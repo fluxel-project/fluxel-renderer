@@ -30,7 +30,10 @@ mod resources;
 mod tests;
 
 use contract::validate;
-use js::{call0, call1, call2, call3, get, js_message, request_browser, set, to_js};
+use js::{
+    BrowserRequestProvider, ProductionBrowserRequests, call0, call1, call2, call3, get, js_message,
+    request_browser, set, to_js,
+};
 use resources::{
     FrameDrawResources, create_frame_resources, destroy_frame_resources, pipeline,
     unregister_uncaptured_error, write_buffer,
@@ -244,15 +247,24 @@ pub struct WebGpuSession {
     recovery_promise: Rc<RefCell<Option<Promise>>>,
     dispose_promise: Rc<RefCell<Option<Promise>>>,
     adapter_info: Rc<RefCell<WebGpuAdapterInfo>>,
+    requests: Rc<dyn BrowserRequestProvider>,
 }
 
 impl WebGpuSession {
     /// Requests adapter/device and creates the closed fixed recipe for canvas.
     pub async fn new(canvas: JsValue) -> Result<Self, WebGpuSessionError> {
+        Self::new_with_requests(canvas, Rc::new(ProductionBrowserRequests)).await
+    }
+
+    async fn new_with_requests(
+        canvas: JsValue,
+        requests: Rc<dyn BrowserRequestProvider>,
+    ) -> Result<Self, WebGpuSessionError> {
         let canvas = canvas
             .dyn_into::<HtmlCanvasElement>()
             .map_err(|_| WebGpuSessionError::CanvasUnavailable)?;
-        let (format, info, device, queue, context) = request_browser(&canvas).await?;
+        let (format, info, device, queue, context) =
+            request_browser(&canvas, requests.as_ref()).await?;
         let shared = Rc::new(RefCell::new(Shared {
             state: WebGpuSessionState::Suspended,
             generation: 1,
@@ -272,6 +284,7 @@ impl WebGpuSession {
             recovery_promise: Rc::new(RefCell::new(None)),
             dispose_promise: Rc::new(RefCell::new(None)),
             adapter_info: Rc::new(RefCell::new(info)),
+            requests,
         };
         let objects = match value
             .install(
@@ -530,7 +543,7 @@ impl WebGpuSession {
         let session = self.shared_clone();
         let promise = future_to_promise(async move {
             let (format, info, device, queue, context) =
-                match request_browser(&session.canvas).await {
+                match request_browser(&session.canvas, session.requests.as_ref()).await {
                     Ok(value) => value,
                     Err(error) => {
                         // A terminal operation may finish while adapter/device
@@ -743,6 +756,7 @@ impl WebGpuSession {
             recovery_promise: Rc::clone(&self.recovery_promise),
             dispose_promise: Rc::clone(&self.dispose_promise),
             adapter_info: Rc::clone(&self.adapter_info),
+            requests: Rc::clone(&self.requests),
         }
     }
 

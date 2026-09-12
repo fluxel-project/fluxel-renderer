@@ -10,6 +10,28 @@ use web_sys::HtmlCanvasElement;
 
 use super::{WebGpuAdapterInfo, WebGpuCanvasFormat, WebGpuSessionError};
 
+/// RHI-private boundary around the two asynchronous browser device requests.
+///
+/// Production delegates directly to WebGPU. Browser contract tests replace
+/// only these calls so they can control settlement while the real
+/// `request_browser` recovery path remains under test.
+pub(super) trait BrowserRequestProvider {
+    fn request_adapter(&self, gpu: &JsValue) -> Result<js_sys::Promise, JsValue>;
+    fn request_device(&self, adapter: &JsValue) -> Result<js_sys::Promise, JsValue>;
+}
+
+pub(super) struct ProductionBrowserRequests;
+
+impl BrowserRequestProvider for ProductionBrowserRequests {
+    fn request_adapter(&self, gpu: &JsValue) -> Result<js_sys::Promise, JsValue> {
+        call0(gpu, "requestAdapter").map(js_sys::Promise::from)
+    }
+
+    fn request_device(&self, adapter: &JsValue) -> Result<js_sys::Promise, JsValue> {
+        call0(adapter, "requestDevice").map(js_sys::Promise::from)
+    }
+}
+
 pub(super) fn global() -> JsValue {
     js_sys::global().into()
 }
@@ -18,6 +40,7 @@ pub(super) fn global() -> JsValue {
 /// executor. Lifecycle installation/configuration remains in the parent.
 pub(super) async fn request_browser(
     canvas: &HtmlCanvasElement,
+    requests: &dyn BrowserRequestProvider,
 ) -> Result<
     (
         WebGpuCanvasFormat,
@@ -42,9 +65,11 @@ pub(super) async fn request_browser(
         .map_err(|error| browser("canvas-context", 0, error))?
         .ok_or(WebGpuSessionError::Unavailable)?
         .into();
-    let adapter = JsFuture::from(js_sys::Promise::from(
-        call0(&gpu, "requestAdapter").map_err(|error| browser("request-adapter", 0, error))?,
-    ))
+    let adapter = JsFuture::from(
+        requests
+            .request_adapter(&gpu)
+            .map_err(|error| browser("request-adapter", 0, error))?,
+    )
     .await
     .map_err(|error| browser("request-adapter", 0, error))?;
     if adapter.is_null() || adapter.is_undefined() {
@@ -63,9 +88,11 @@ pub(super) async fn request_browser(
                 .unwrap_or_default(),
         })
         .unwrap_or_default();
-    let device = JsFuture::from(js_sys::Promise::from(
-        call0(&adapter, "requestDevice").map_err(|error| browser("request-device", 0, error))?,
-    ))
+    let device = JsFuture::from(
+        requests
+            .request_device(&adapter)
+            .map_err(|error| browser("request-device", 0, error))?,
+    )
     .await
     .map_err(|error| browser("request-device", 0, error))?;
     let queue = match get(&device, "queue") {

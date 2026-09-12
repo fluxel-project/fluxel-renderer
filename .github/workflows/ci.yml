@@ -86,6 +86,33 @@ jobs:
       - run: wasm-bindgen --target web --out-dir target/wasm-bindgen-smoke target/wasm32-unknown-unknown/release/fluxel_rendering_wasm.wasm
       - run: python3 -c "from pathlib import Path; stage = Path('target/wasm-bindgen-smoke'); assert any(stage.glob('*.js')); assert any(stage.glob('*_bg.wasm'))"
 
+  wasm-webgpu-contract:
+    name: WebGPU production request recovery contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: browser-actions/setup-chrome@v1
+        id: chrome-with-driver
+        with:
+          install-chromedriver: true
+      - run: cargo install wasm-bindgen-cli --version 0.2.128 --locked
+      - name: Run deferred native request recovery tests in Chrome
+        run: >-
+          cargo test -p fluxel-rhi
+          --target wasm32-unknown-unknown
+          --no-default-features
+          --features webgpu
+          --lib
+          --locked
+        env:
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
+          CHROMEDRIVER: ${{ steps.chrome-with-driver.outputs.chromedriver-path }}
+          WASM_BINDGEN_TEST_TIMEOUT: "120"
+          WASM_BINDGEN_TEST_WEBDRIVER_JSON: scripts/webgpu_webdriver.json
+
   cross-repo-browser-smoke:
     name: Exact-revision ${{ matrix.backend }} WASM to JSBridge Chrome smoke
     runs-on: ubuntu-latest

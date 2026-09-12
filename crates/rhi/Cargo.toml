@@ -47,3 +47,6 @@ web-sys = { version = "0.3.77", optional = true, features = [
     "WebGlProgram", "WebGlShader", "WebGlSync", "WebGlUniformLocation",
     "WebGlVertexArrayObject", "WebGlContextEvent", "console",
 ] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3.50"

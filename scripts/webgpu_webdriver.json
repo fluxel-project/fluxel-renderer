@@ -1,0 +1,12 @@
+{
+  "goog:chromeOptions": {
+    "args": [
+      "enable-unsafe-webgpu",
+      "enable-unsafe-swiftshader",
+      "enable-features=Vulkan",
+      "ignore-gpu-blocklist",
+      "use-angle=swiftshader",
+      "use-vulkan=swiftshader"
+    ]
+  }
+}
