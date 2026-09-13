@@ -95,6 +95,17 @@ fn raster_profile_is_single_queue_raster_compute_copy_rgba8() {
 }
 
 #[test]
+fn portable_compute_profile_excludes_device_specific_storage_textures() {
+    let capabilities = ComputeBackend::portable_capabilities();
+    let rgba8 = capabilities
+        .texture_formats
+        .iter()
+        .find(|facts| facts.format == TextureFormat::Rgba8Unorm)
+        .unwrap();
+    assert!(!rgba8.storage_read && !rgba8.storage_write);
+}
+
+#[test]
 fn raster_profile_propagates_actual_rgba8_filterability() {
     let filterable = raster_capabilities_from_limit_and_filterability([1, 1, 1], true, true);
     let not_filterable = raster_capabilities_from_limit_and_filterability([1, 1, 1], false, false);

@@ -34,7 +34,8 @@ pub(in crate::execution) struct TestTransientTransition {
 }
 
 impl ComputeBackend {
-    /// Creates a compute-and-copy backend over an already opened native device.
+    /// Creates a compute-and-copy backend with the selected device's verified
+    /// storage-texture capabilities.
     pub fn new(device: Device) -> Self {
         Self {
             capabilities: compute_capabilities(&device),
@@ -45,7 +46,23 @@ impl ComputeBackend {
         }
     }
 
-    /// Returns the normalized capability profile used by fixed compute fixtures.
+    /// Creates a backend for plans compiled against [`Self::portable_capabilities`].
+    ///
+    /// This profile deliberately omits storage-texture kernels because their
+    /// verified access modes may differ between DX12 and Vulkan. Buffer-only
+    /// fixed compute plans can therefore retain one compiled allocation across
+    /// both native backends.
+    pub fn for_portable_profile(device: Device) -> Self {
+        Self {
+            capabilities: Self::portable_capabilities(),
+            device,
+            retired: Vec::new(),
+            #[cfg(test)]
+            transient_observations: TestTransientObservations::default(),
+        }
+    }
+
+    /// Returns the normalized cross-backend buffer-compute capability profile.
     pub fn portable_capabilities() -> DeviceCapabilities {
         // The cross-backend profile is conservative. A real backend instance
         // additionally carries its verified native workgroup count.

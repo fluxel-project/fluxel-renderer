@@ -1103,7 +1103,9 @@ fn run_compute_case(
         provider.register_pipeline(*pipeline_id, pipeline).unwrap();
         provider.register_bindings(*bindings, *pipeline_id).unwrap();
     }
-    let executor = fluxel_rendergraph::FrameExecutor::new(ComputeBackend::new(device.clone()));
+    let executor = fluxel_rendergraph::FrameExecutor::new(ComputeBackend::for_portable_profile(
+        device.clone(),
+    ));
     let mut frame = executor
         .execute(
             compiled,
