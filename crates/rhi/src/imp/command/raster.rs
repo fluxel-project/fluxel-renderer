@@ -48,10 +48,10 @@ pub(crate) fn begin_raster(
     if !Arc::ptr_eq(&encoder.owner, &texture.owner) {
         return Err("raster attachment belongs to another native device".into());
     }
-    if let Some((depth_texture, _, _, _)) = depth
-        && !Arc::ptr_eq(&encoder.owner, &depth_texture.owner)
-    {
-        return Err("depth attachment belongs to another native device".into());
+    if let Some((depth_texture, _, _, _)) = depth {
+        if !Arc::ptr_eq(&encoder.owner, &depth_texture.owner) {
+            return Err("depth attachment belongs to another native device".into());
+        }
     }
     let expected_state = if load {
         ResourceAccessState::ColorAttachmentReadWrite

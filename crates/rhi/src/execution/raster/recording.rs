@@ -200,10 +200,10 @@ impl ExecutionBackend for RasterBackend {
                 let operations = attachment
                     .depth
                     .ok_or(NativeExecutionError::RasterStateMismatch)?;
-                if let LoadOp::Clear(value) = operations.load
-                    && (!value.is_finite() || !(0.0..=1.0).contains(&value))
-                {
-                    return Err(NativeExecutionError::RasterStateMismatch);
+                if let LoadOp::Clear(value) = operations.load {
+                    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+                        return Err(NativeExecutionError::RasterStateMismatch);
+                    }
                 }
                 if operations.store != StoreOp::Store
                     || matches!(operations.load, LoadOp::DontCare)
