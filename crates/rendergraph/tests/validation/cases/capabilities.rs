@@ -25,9 +25,14 @@ fn compute_buffer_texture_and_surface_capabilities_are_checked() {
             final_state: ResourceAccessState::ShaderStorageWrite,
         },
     );
-    assert_error(
-        compute.compile(&capabilities(false, true, true, true)),
-        CompileErrorKind::UnsupportedSemanticRequirement,
+    let compute_caps = capabilities(false, true, true, true);
+    assert_unsupported(
+        compute.compile(&compute_caps),
+        &compute_caps,
+        CapabilityRequirement::Queue {
+            pass_kinds: vec![PassKind::Compute],
+            present: false,
+        },
     );
 
     let mut buffer_caps = RenderGraph::<()>::new();
@@ -51,9 +56,13 @@ fn compute_buffer_texture_and_surface_capabilities_are_checked() {
             final_state: ResourceAccessState::ShaderStorageWrite,
         },
     );
-    assert_error(
-        buffer_caps.compile(&capabilities(true, false, true, true)),
-        CompileErrorKind::UnsupportedSemanticRequirement,
+    let buffer_capabilities = capabilities(true, false, true, true);
+    assert_unsupported(
+        buffer_caps.compile(&buffer_capabilities),
+        &buffer_capabilities,
+        CapabilityRequirement::BufferState {
+            state: ResourceAccessState::ShaderStorageWrite,
+        },
     );
 
     let mut texture_caps = RenderGraph::<()>::new();
@@ -77,9 +86,15 @@ fn compute_buffer_texture_and_surface_capabilities_are_checked() {
             final_state: ResourceAccessState::ShaderStorageWrite,
         },
     );
-    assert_error(
-        texture_caps.compile(&capabilities(true, true, false, true)),
-        CompileErrorKind::UnsupportedSemanticRequirement,
+    let texture_capabilities = capabilities(true, true, false, true);
+    assert_unsupported(
+        texture_caps.compile(&texture_capabilities),
+        &texture_capabilities,
+        CapabilityRequirement::TextureState {
+            format: TextureFormat::Rgba8Unorm,
+            sample_count: 1,
+            state: ResourceAccessState::ShaderStorageWrite,
+        },
     );
 
     let mut surface_caps = RenderGraph::<()>::new();
@@ -105,9 +120,183 @@ fn compute_buffer_texture_and_surface_capabilities_are_checked() {
         |_commands, _resolver, _data, _frame| Ok(()),
     );
     surface_caps.present(pass.output, PresentContract::new());
-    assert_error(
-        surface_caps.compile(&capabilities(true, true, true, false)),
-        CompileErrorKind::UnsupportedSemanticRequirement,
+    let surface_capabilities = capabilities(true, true, true, false);
+    assert_unsupported(
+        surface_caps.compile(&surface_capabilities),
+        &surface_capabilities,
+        CapabilityRequirement::Surface {
+            operation: SurfaceCapabilityOperation::ColorAttachment,
+            format: TextureFormat::Rgba8Unorm,
+        },
+    );
+}
+
+#[derive(Clone, Copy)]
+enum StorageAccess {
+    Read,
+    Write,
+    ReadWrite,
+}
+
+#[test]
+fn every_storage_buffer_access_reports_its_exact_required_state() {
+    for (access, state) in [
+        (StorageAccess::Read, ResourceAccessState::ShaderStorageRead),
+        (
+            StorageAccess::Write,
+            ResourceAccessState::ShaderStorageWrite,
+        ),
+        (
+            StorageAccess::ReadWrite,
+            ResourceAccessState::ShaderStorageReadWrite,
+        ),
+    ] {
+        let mut graph = RenderGraph::<()>::new();
+        let buffer = graph.import_buffer_slot(
+            "storage",
+            ImportBufferContract {
+                descriptor: BufferDesc { size: 16 },
+                initial_state: ResourceAccessState::CopySource,
+                ownership: ExternalOwnership::Caller,
+                initial_contents: InitialContents::Defined,
+            },
+        );
+        let pass = graph.add_compute_pass(
+            "storage",
+            |pass| {
+                match access {
+                    StorageAccess::Read => {
+                        let _ = pass.read_buffer(
+                            &buffer.version,
+                            BufferReadUse::Storage,
+                            BufferRange::whole(),
+                        );
+                    }
+                    StorageAccess::Write => {
+                        let _ = pass.write_buffer(
+                            buffer.version,
+                            BufferWriteUse::Storage,
+                            BufferRange::whole(),
+                            WriteCoverage::Full,
+                        );
+                    }
+                    StorageAccess::ReadWrite => {
+                        let _ = pass.read_write_buffer(
+                            buffer.version,
+                            BufferReadWriteUse::Storage,
+                            BufferRange::whole(),
+                        );
+                    }
+                }
+                ((), ())
+            },
+            |_commands, _resolver, _data, _frame| Ok(()),
+        );
+        graph.mark_side_effect(pass.id, SideEffectReason::Diagnostic("retain".into()));
+        let caps = capabilities(true, false, true, true);
+        assert_unsupported(
+            graph.compile(&caps),
+            &caps,
+            CapabilityRequirement::BufferState { state },
+        );
+    }
+}
+
+#[test]
+fn every_storage_texture_access_reports_its_exact_required_state() {
+    for (access, state) in [
+        (StorageAccess::Read, ResourceAccessState::ShaderStorageRead),
+        (
+            StorageAccess::Write,
+            ResourceAccessState::ShaderStorageWrite,
+        ),
+        (
+            StorageAccess::ReadWrite,
+            ResourceAccessState::ShaderStorageReadWrite,
+        ),
+    ] {
+        let mut graph = RenderGraph::<()>::new();
+        let image = graph.import_texture_slot(
+            "storage",
+            ImportTextureContract {
+                descriptor: texture(),
+                initial_state: ResourceAccessState::CopySource,
+                ownership: ExternalOwnership::Caller,
+                initial_contents: InitialContents::Defined,
+            },
+        );
+        let pass = graph.add_compute_pass(
+            "storage",
+            |pass| {
+                match access {
+                    StorageAccess::Read => {
+                        let _ = pass.read_texture(
+                            &image.version,
+                            TextureReadUse::Storage,
+                            TextureRange::whole(),
+                        );
+                    }
+                    StorageAccess::Write => {
+                        let _ = pass.write_texture(
+                            image.version,
+                            TextureWriteUse::Storage,
+                            TextureRange::whole(),
+                            WriteCoverage::Full,
+                        );
+                    }
+                    StorageAccess::ReadWrite => {
+                        let _ = pass.read_write_texture(
+                            image.version,
+                            TextureReadWriteUse::Storage,
+                            TextureRange::whole(),
+                        );
+                    }
+                }
+                ((), ())
+            },
+            |_commands, _resolver, _data, _frame| Ok(()),
+        );
+        graph.mark_side_effect(pass.id, SideEffectReason::Diagnostic("retain".into()));
+        let caps = capabilities(true, true, false, true);
+        assert_unsupported(
+            graph.compile(&caps),
+            &caps,
+            CapabilityRequirement::TextureState {
+                format: TextureFormat::Rgba8Unorm,
+                sample_count: 1,
+                state,
+            },
+        );
+    }
+}
+
+#[test]
+fn missing_texture_format_has_a_distinct_requirement() {
+    let mut graph = RenderGraph::<()>::new();
+    let mut descriptor = texture();
+    descriptor.format = TextureFormat::Rgba8UnormSrgb;
+    let image = graph.create_texture("sRGB", descriptor);
+    let pass = graph.add_compute_pass(
+        "write",
+        |pass| {
+            let _ = pass.write_texture(
+                image,
+                TextureWriteUse::Storage,
+                TextureRange::whole(),
+                WriteCoverage::Full,
+            );
+            ((), ())
+        },
+        |_commands, _resolver, _data, _frame| Ok(()),
+    );
+    graph.mark_side_effect(pass.id, SideEffectReason::Diagnostic("retain".into()));
+    let caps = capabilities(true, true, true, true);
+    assert_unsupported(
+        graph.compile(&caps),
+        &caps,
+        CapabilityRequirement::TextureFormat {
+            format: TextureFormat::Rgba8UnormSrgb,
+        },
     );
 }
 
@@ -140,9 +329,14 @@ fn srgb_format_requires_its_own_capability_entry() {
     graph.mark_side_effect(sampled.id, SideEffectReason::Diagnostic("retain".into()));
 
     let mut caps = capabilities(true, true, true, true);
-    assert_error(
+    assert_unsupported(
         graph.compile(&caps),
-        CompileErrorKind::UnsupportedSemanticRequirement,
+        &caps,
+        CapabilityRequirement::TextureState {
+            format: TextureFormat::Rgba8UnormSrgb,
+            sample_count: 1,
+            state: ResourceAccessState::ShaderSampledRead,
+        },
     );
 
     caps.texture_formats.push(

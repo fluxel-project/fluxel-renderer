@@ -88,6 +88,13 @@ from this repository, run it with:
 cargo run -p fluxel-rendergraph --example 00_minimal_compile
 ```
 
+When compilation returns `CompileErrorKind::UnsupportedSemanticRequirement`,
+`error.context.unsupported` contains a typed `CapabilityRequirement` and the
+full observed `DeviceCapabilities` snapshot. Use those fields for fallback or
+user-facing diagnostics; `DiagnosticContext::detail` is descriptive text, not
+a matching contract. This reports declared resource and queue semantics only,
+and does not introduce a general pipeline API.
+
 ## Core concepts
 
 ### Versions and typed access handles

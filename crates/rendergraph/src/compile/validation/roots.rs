@@ -67,6 +67,11 @@ pub(in crate::compile) fn validate_roots<F>(
                     return Err(unsupported_root(
                         r,
                         "texture export state is unsupported for its format",
+                        CapabilityRequirement::TextureState {
+                            format: desc.format,
+                            sample_count: desc.sample_count,
+                            state: contract.final_state,
+                        },
                         caps,
                     ));
                 }
@@ -88,6 +93,9 @@ pub(in crate::compile) fn validate_roots<F>(
                     return Err(unsupported_root(
                         r,
                         "buffer export state is unsupported",
+                        CapabilityRequirement::BufferState {
+                            state: contract.final_state,
+                        },
                         caps,
                     ));
                 }
@@ -127,15 +135,32 @@ pub(in crate::compile) fn validate_roots<F>(
                     return Err(unsupported_root(
                         r,
                         "surface capabilities unavailable",
+                        CapabilityRequirement::Surface {
+                            operation: SurfaceCapabilityOperation::Availability,
+                            format: t.format,
+                        },
                         caps,
                     ));
                 };
-                if !s.formats.contains(&t.format)
-                    || !caps.queues.iter().any(|q| q.capabilities.present)
-                {
+                if !s.formats.contains(&t.format) {
                     return Err(unsupported_root(
                         r,
-                        "surface format or present queue unsupported",
+                        "surface format is unsupported for presentation",
+                        CapabilityRequirement::Surface {
+                            operation: SurfaceCapabilityOperation::Format,
+                            format: t.format,
+                        },
+                        caps,
+                    ));
+                }
+                if !caps.queues.iter().any(|q| q.capabilities.present) {
+                    return Err(unsupported_root(
+                        r,
+                        "no queue supports presentation",
+                        CapabilityRequirement::Queue {
+                            pass_kinds: Vec::new(),
+                            present: true,
+                        },
                         caps,
                     ));
                 }

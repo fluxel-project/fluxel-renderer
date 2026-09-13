@@ -98,7 +98,7 @@ fn imported_compute_graph() -> (CompiledGraph<u32>, ImportBufferSlot) {
                         texture_slot: None,
                         buffer_slot: None,
                         detail: "test callback failure".into(),
-                        capabilities: None,
+                        unsupported: None,
                     },
                 });
             }

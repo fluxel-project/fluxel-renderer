@@ -13,7 +13,10 @@ use crate::{
         BufferRange, BufferReadUse, BufferReadWriteUse, BufferWriteUse, TextureAspect,
         TextureRange, TextureReadUse, TextureReadWriteUse, TextureWriteUse, WriteCoverage,
     },
-    error::{CompileError, CompileErrorKind, DiagnosticContext},
+    error::{
+        CapabilityRequirement, CompileError, CompileErrorKind, DiagnosticContext,
+        SurfaceCapabilityOperation, UnsupportedCapability,
+    },
     graph::RenderGraph,
     handles::{PassId, ResourceId},
     internal::{

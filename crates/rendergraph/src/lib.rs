@@ -59,8 +59,8 @@ pub use compile::{
     PassDependency, RetainedSideEffect,
 };
 pub use error::{
-    CompileError, CompileErrorKind, DiagnosticContext, RecordResult, RecordingError,
-    RecordingErrorKind,
+    CapabilityRequirement, CompileError, CompileErrorKind, DiagnosticContext, RecordResult,
+    RecordingError, RecordingErrorKind, SurfaceCapabilityOperation, UnsupportedCapability,
 };
 pub use execution::{
     ExecutedFrame, ExportedBuffer, ExportedTexture, FrameExecution, FrameExecutor, FrameExports,

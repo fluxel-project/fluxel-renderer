@@ -99,6 +99,15 @@ jobs:
         with:
           install-chromedriver: true
       - run: cargo install wasm-bindgen-cli --version 0.2.128 --locked
+      - name: Bind the matching Chrome binary to WebDriver
+        run: >-
+          python3 -c "import json, pathlib;
+          source=pathlib.Path('scripts/webgpu_webdriver.json');
+          output=pathlib.Path('target/webgpu-webdriver.json');
+          data=json.loads(source.read_text());
+          data['goog:chromeOptions']['binary']='${{ steps.chrome-with-driver.outputs.chrome-path }}';
+          output.parent.mkdir(parents=True, exist_ok=True);
+          output.write_text(json.dumps(data))"
       - name: Run deferred native request recovery tests in Chrome
         run: >-
           cargo test -p fluxel-rhi
@@ -111,7 +120,7 @@ jobs:
           CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
           CHROMEDRIVER: ${{ steps.chrome-with-driver.outputs.chromedriver-path }}
           WASM_BINDGEN_TEST_TIMEOUT: "120"
-          WASM_BINDGEN_TEST_WEBDRIVER_JSON: scripts/webgpu_webdriver.json
+          WASM_BINDGEN_TEST_WEBDRIVER_JSON: ${{ github.workspace }}/target/webgpu-webdriver.json
 
   cross-repo-browser-smoke:
     name: Exact-revision ${{ matrix.backend }} WASM to JSBridge Chrome smoke

@@ -51,7 +51,27 @@ fn capabilities(
 }
 
 fn assert_error(result: CompileResult, expected: CompileErrorKind) {
-    assert_eq!(result.expect_err("graph should be rejected").kind, expected);
+    let error = result.expect_err("graph should be rejected");
+    assert_eq!(error.kind, expected);
+    assert!(
+        error.context.unsupported.is_none(),
+        "non-capability errors must not carry capability evidence"
+    );
+}
+
+fn assert_unsupported(
+    result: CompileResult,
+    capabilities: &DeviceCapabilities,
+    expected: CapabilityRequirement,
+) {
+    let error = result.expect_err("graph should be rejected");
+    assert_eq!(error.kind, CompileErrorKind::UnsupportedSemanticRequirement);
+    let unsupported = error
+        .context
+        .unsupported
+        .expect("capability rejection must include structured evidence");
+    assert_eq!(unsupported.requirement, expected);
+    assert_eq!(unsupported.observed.as_ref(), capabilities);
 }
 
 fn import_buffer(contents: InitialContents) -> ImportBufferContract {

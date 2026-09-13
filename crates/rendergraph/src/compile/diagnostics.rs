@@ -6,6 +6,7 @@ pub(super) fn unsupported(
     p: PassId,
     r: Option<ResourceId>,
     d: &str,
+    requirement: CapabilityRequirement,
     c: &DeviceCapabilities,
 ) -> CompileError {
     err(
@@ -13,16 +14,27 @@ pub(super) fn unsupported(
         vec![p],
         r,
         d,
-        Some(c.clone()),
+        Some(Box::new(UnsupportedCapability {
+            requirement,
+            observed: Box::new(c.clone()),
+        })),
     )
 }
-pub(super) fn unsupported_root(r: ResourceId, d: &str, c: &DeviceCapabilities) -> CompileError {
+pub(super) fn unsupported_root(
+    r: ResourceId,
+    d: &str,
+    requirement: CapabilityRequirement,
+    c: &DeviceCapabilities,
+) -> CompileError {
     err(
         CompileErrorKind::UnsupportedSemanticRequirement,
         Vec::new(),
         Some(r),
         d,
-        Some(c.clone()),
+        Some(Box::new(UnsupportedCapability {
+            requirement,
+            observed: Box::new(c.clone()),
+        })),
     )
 }
 pub(super) fn err(
@@ -30,7 +42,7 @@ pub(super) fn err(
     passes: Vec<PassId>,
     resource: Option<ResourceId>,
     detail: impl Into<String>,
-    capabilities: Option<DeviceCapabilities>,
+    unsupported: Option<Box<UnsupportedCapability>>,
 ) -> CompileError {
     CompileError {
         kind,
@@ -40,7 +52,7 @@ pub(super) fn err(
             texture_slot: None,
             buffer_slot: None,
             detail: detail.into(),
-            capabilities: capabilities.map(Box::new),
+            unsupported,
         },
     }
 }

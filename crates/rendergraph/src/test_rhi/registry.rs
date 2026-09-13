@@ -271,7 +271,7 @@ fn recording_error(_kind: RecordingErrorKind, _detail: impl Into<String>) -> Rec
             texture_slot: None,
             buffer_slot: None,
             detail: _detail.into(),
-            capabilities: None,
+            unsupported: None,
         },
     }
 }

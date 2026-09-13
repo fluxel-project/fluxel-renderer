@@ -21,7 +21,7 @@ fn compile_error() -> CompileError {
             texture_slot: None,
             buffer_slot: None,
             detail: "test compile cause".into(),
-            capabilities: None,
+            unsupported: None,
         },
     }
 }

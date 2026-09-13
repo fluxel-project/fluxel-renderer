@@ -110,9 +110,13 @@ fn surface_rejects_unmodeled_texture_semantics_and_non_swapchain_shapes() {
     );
     graph.mark_side_effect(sampled.id, SideEffectReason::Diagnostic("retain".into()));
     graph.present(initialized.output, PresentContract::new());
-    assert_error(
+    assert_unsupported(
         graph.compile(&caps),
-        CompileErrorKind::UnsupportedSemanticRequirement,
+        &caps,
+        CapabilityRequirement::Surface {
+            operation: SurfaceCapabilityOperation::SampledRead,
+            format: TextureFormat::Rgba8Unorm,
+        },
     );
 
     let mut graph = RenderGraph::<()>::new();
@@ -127,6 +131,114 @@ fn surface_rejects_unmodeled_texture_semantics_and_non_swapchain_shapes() {
     assert_error(
         graph.compile(&caps),
         CompileErrorKind::InvalidSubresourceRange,
+    );
+}
+
+#[test]
+fn surface_availability_format_and_present_queue_are_distinct_requirements() {
+    let mut availability_graph = RenderGraph::<()>::new();
+    let surface = availability_graph.import_surface_texture_slot(
+        "surface",
+        SurfaceTextureContract {
+            descriptor: texture(),
+        },
+    );
+    let pass = availability_graph.add_raster_pass(
+        "surface-color",
+        |builder| {
+            let next = builder.color_attachment(
+                surface.version,
+                super::capabilities::color_ops(
+                    LoadOp::Clear([0.0; 4]),
+                    StoreOp::Store,
+                    WriteCoverage::Unknown,
+                ),
+            );
+            (next, ())
+        },
+        |_, _, _, _| Ok(()),
+    );
+    availability_graph.present(pass.output, PresentContract::new());
+    let mut unavailable = capabilities(true, true, true, true);
+    unavailable.surface = None;
+    assert_unsupported(
+        availability_graph.compile(&unavailable),
+        &unavailable,
+        CapabilityRequirement::Surface {
+            operation: SurfaceCapabilityOperation::Availability,
+            format: TextureFormat::Rgba8Unorm,
+        },
+    );
+
+    let mut format_graph = RenderGraph::<()>::new();
+    let surface = format_graph.import_surface_texture_slot(
+        "surface",
+        SurfaceTextureContract {
+            descriptor: texture(),
+        },
+    );
+    let pass = format_graph.add_raster_pass(
+        "surface-color",
+        |builder| {
+            let next = builder.color_attachment(
+                surface.version,
+                super::capabilities::color_ops(
+                    LoadOp::Clear([0.0; 4]),
+                    StoreOp::Store,
+                    WriteCoverage::Unknown,
+                ),
+            );
+            (next, ())
+        },
+        |_, _, _, _| Ok(()),
+    );
+    format_graph.present(pass.output, PresentContract::new());
+    let mut wrong_format = capabilities(true, true, true, true);
+    wrong_format.surface = Some(SurfaceCapabilities::new(Vec::new(), true, true));
+    assert_unsupported(
+        format_graph.compile(&wrong_format),
+        &wrong_format,
+        CapabilityRequirement::Surface {
+            operation: SurfaceCapabilityOperation::Format,
+            format: TextureFormat::Rgba8Unorm,
+        },
+    );
+}
+
+#[test]
+fn raster_presentation_requires_one_queue_that_supports_both() {
+    let mut graph = RenderGraph::<()>::new();
+    let surface = graph.import_surface_texture_slot(
+        "surface",
+        SurfaceTextureContract {
+            descriptor: texture(),
+        },
+    );
+    let pass = graph.add_raster_pass(
+        "surface-color",
+        |builder| {
+            let next = builder.color_attachment(
+                surface.version,
+                super::capabilities::color_ops(
+                    LoadOp::Clear([0.0; 4]),
+                    StoreOp::Store,
+                    WriteCoverage::Unknown,
+                ),
+            );
+            (next, ())
+        },
+        |_, _, _, _| Ok(()),
+    );
+    graph.present(pass.output, PresentContract::new());
+    let mut caps = capabilities(true, true, true, true);
+    caps.queues[0].capabilities.present = false;
+    assert_unsupported(
+        graph.compile(&caps),
+        &caps,
+        CapabilityRequirement::Queue {
+            pass_kinds: vec![PassKind::Raster],
+            present: true,
+        },
     );
 }
 
@@ -152,8 +264,9 @@ fn ordinary_imports_reject_surface_ownership_and_duplicate_queue_ids() {
         QueueId::new(0),
         QueueCapabilities::new(true, true, true, true),
     ));
-    assert_error(
+    assert_unsupported(
         RenderGraph::<()>::new().compile(&caps),
-        CompileErrorKind::UnsupportedSemanticRequirement,
+        &caps,
+        CapabilityRequirement::QueueConfiguration,
     );
 }

@@ -16,7 +16,10 @@ pub(in crate::compile) fn validate_capabilities<F>(
                 Vec::new(),
                 None,
                 "device capabilities contain duplicate logical queue identifiers",
-                Some(caps.clone()),
+                Some(Box::new(UnsupportedCapability {
+                    requirement: CapabilityRequirement::QueueConfiguration,
+                    observed: Box::new(caps.clone()),
+                })),
             ));
         }
     }
@@ -33,6 +36,11 @@ pub(in crate::compile) fn validate_capabilities<F>(
                 return Err(unsupported_root(
                     resource.id,
                     "texture import state is unsupported for its format",
+                    CapabilityRequirement::TextureState {
+                        format: contract.descriptor.format,
+                        sample_count: contract.descriptor.sample_count,
+                        state: contract.initial_state,
+                    },
                     caps,
                 ));
             }
@@ -43,6 +51,9 @@ pub(in crate::compile) fn validate_capabilities<F>(
                 return Err(unsupported_root(
                     resource.id,
                     "buffer import state is unsupported",
+                    CapabilityRequirement::BufferState {
+                        state: contract.initial_state,
+                    },
                     caps,
                 ));
             }
@@ -81,12 +92,30 @@ pub(in crate::compile) fn validate_capabilities<F>(
             .filter(|pass| retained.contains(&pass.id))
             .map(|pass| pass.id)
             .collect();
+        let mut pass_kinds: Vec<_> = graph
+            .passes
+            .iter()
+            .filter(|pass| retained.contains(&pass.id))
+            .map(|pass| pass.kind)
+            .collect();
+        pass_kinds.sort_by_key(|kind| match kind {
+            PassKind::Raster => 0,
+            PassKind::Compute => 1,
+            PassKind::Copy => 2,
+        });
+        pass_kinds.dedup();
         return Err(err(
             CompileErrorKind::UnsupportedSemanticRequirement,
             passes,
             None,
             "the current single-queue compiler requires one logical queue that supports every retained pass kind and presentation requirement",
-            Some(caps.clone()),
+            Some(Box::new(UnsupportedCapability {
+                requirement: CapabilityRequirement::Queue {
+                    pass_kinds,
+                    present: needs_present,
+                },
+                observed: Box::new(caps.clone()),
+            })),
         ));
     }
     for p in graph.passes.iter().filter(|p| retained.contains(&p.id)) {
@@ -100,6 +129,10 @@ pub(in crate::compile) fn validate_capabilities<F>(
                 p.id,
                 None,
                 "no queue supports this pass kind",
+                CapabilityRequirement::Queue {
+                    pass_kinds: vec![p.kind],
+                    present: false,
+                },
                 caps,
             ));
         }
@@ -120,6 +153,10 @@ pub(in crate::compile) fn validate_capabilities<F>(
                 p.id,
                 None,
                 "color attachment count exceeds limit",
+                CapabilityRequirement::ColorAttachmentCount {
+                    required: required_color_slots,
+                    supported: caps.limits.max_color_attachments,
+                },
                 caps,
             ));
         }
@@ -133,6 +170,9 @@ pub(in crate::compile) fn validate_capabilities<F>(
                         p.id,
                         Some(r.id),
                         "storage buffer reads unsupported",
+                        CapabilityRequirement::BufferState {
+                            state: ResourceAccessState::ShaderStorageRead,
+                        },
                         caps,
                     ));
                 }
@@ -143,6 +183,9 @@ pub(in crate::compile) fn validate_capabilities<F>(
                         p.id,
                         Some(r.id),
                         "indirect buffer reads unsupported",
+                        CapabilityRequirement::BufferState {
+                            state: ResourceAccessState::IndirectRead,
+                        },
                         caps,
                     ));
                 }
@@ -153,6 +196,9 @@ pub(in crate::compile) fn validate_capabilities<F>(
                         p.id,
                         Some(r.id),
                         "storage buffer writes unsupported",
+                        CapabilityRequirement::BufferState {
+                            state: ResourceAccessState::ShaderStorageWrite,
+                        },
                         caps,
                     ));
                 }
@@ -164,6 +210,9 @@ pub(in crate::compile) fn validate_capabilities<F>(
                         p.id,
                         Some(r.id),
                         "storage buffer read-write unsupported",
+                        CapabilityRequirement::BufferState {
+                            state: ResourceAccessState::ShaderStorageReadWrite,
+                        },
                         caps,
                     ));
                 }
@@ -173,6 +222,7 @@ pub(in crate::compile) fn validate_capabilities<F>(
                             p.id,
                             Some(r.id),
                             "missing texture format capabilities",
+                            CapabilityRequirement::TextureFormat { format: d.format },
                             caps,
                         ));
                     };
@@ -202,6 +252,11 @@ pub(in crate::compile) fn validate_capabilities<F>(
                             p.id,
                             Some(r.id),
                             "texture semantic unsupported for format",
+                            CapabilityRequirement::TextureState {
+                                format: d.format,
+                                sample_count: d.sample_count,
+                                state: texture_state_for_semantic(semantic),
+                            },
                             caps,
                         ));
                     }
@@ -211,6 +266,10 @@ pub(in crate::compile) fn validate_capabilities<F>(
                                 p.id,
                                 Some(r.id),
                                 "surface capabilities unavailable",
+                                CapabilityRequirement::Surface {
+                                    operation: SurfaceCapabilityOperation::Availability,
+                                    format: d.format,
+                                },
                                 caps,
                             ));
                         };
@@ -226,6 +285,10 @@ pub(in crate::compile) fn validate_capabilities<F>(
                                 p.id,
                                 Some(r.id),
                                 "surface destination semantic unsupported",
+                                CapabilityRequirement::Surface {
+                                    operation: surface_operation(semantic),
+                                    format: d.format,
+                                },
                                 caps,
                             ));
                         }
@@ -236,4 +299,56 @@ pub(in crate::compile) fn validate_capabilities<F>(
         }
     }
     Ok(())
+}
+
+fn texture_state_for_semantic(semantic: AccessSemantic) -> ResourceAccessState {
+    match semantic {
+        AccessSemantic::TextureRead(TextureReadUse::Sampled) => {
+            ResourceAccessState::ShaderSampledRead
+        }
+        AccessSemantic::TextureRead(TextureReadUse::Storage) => {
+            ResourceAccessState::ShaderStorageRead
+        }
+        AccessSemantic::TextureRead(TextureReadUse::CopySource) => ResourceAccessState::CopySource,
+        AccessSemantic::TextureWrite(TextureWriteUse::Storage) => {
+            ResourceAccessState::ShaderStorageWrite
+        }
+        AccessSemantic::TextureReadWrite(TextureReadWriteUse::Storage) => {
+            ResourceAccessState::ShaderStorageReadWrite
+        }
+        AccessSemantic::TextureWrite(TextureWriteUse::CopyDestination) => {
+            ResourceAccessState::CopyDestination
+        }
+        AccessSemantic::ColorAttachment { .. } => ResourceAccessState::ColorAttachmentWrite,
+        AccessSemantic::DepthStencilAttachment { .. } => ResourceAccessState::DepthStencilWrite,
+        _ => unreachable!("texture capability validation only receives texture semantics"),
+    }
+}
+
+fn surface_operation(semantic: AccessSemantic) -> SurfaceCapabilityOperation {
+    match semantic {
+        AccessSemantic::ColorAttachment { .. } => SurfaceCapabilityOperation::ColorAttachment,
+        AccessSemantic::TextureWrite(TextureWriteUse::CopyDestination) => {
+            SurfaceCapabilityOperation::CopyDestination
+        }
+        AccessSemantic::TextureRead(TextureReadUse::Sampled) => {
+            SurfaceCapabilityOperation::SampledRead
+        }
+        AccessSemantic::TextureRead(TextureReadUse::Storage) => {
+            SurfaceCapabilityOperation::StorageRead
+        }
+        AccessSemantic::TextureWrite(TextureWriteUse::Storage) => {
+            SurfaceCapabilityOperation::StorageWrite
+        }
+        AccessSemantic::TextureReadWrite(TextureReadWriteUse::Storage) => {
+            SurfaceCapabilityOperation::StorageReadWrite
+        }
+        AccessSemantic::TextureRead(TextureReadUse::CopySource) => {
+            SurfaceCapabilityOperation::CopySource
+        }
+        AccessSemantic::DepthStencilAttachment { .. } => {
+            SurfaceCapabilityOperation::DepthStencilAttachment
+        }
+        _ => unreachable!("surface capability validation only receives texture semantics"),
+    }
 }

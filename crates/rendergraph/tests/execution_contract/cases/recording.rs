@@ -533,7 +533,7 @@ fn callback_and_backend_failures_do_not_submit() {
                     texture_slot: None,
                     buffer_slot: None,
                     detail: "intentional callback failure".into(),
-                    capabilities: None,
+                    unsupported: None,
                 },
             })
         },

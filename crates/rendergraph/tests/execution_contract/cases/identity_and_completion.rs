@@ -276,7 +276,7 @@ fn acquired_surface_image_transitions_and_presents_with_its_root() {
                         texture_slot: None,
                         buffer_slot: None,
                         detail: "test surface callback failure".into(),
-                        capabilities: None,
+                        unsupported: None,
                     },
                 })
             } else {

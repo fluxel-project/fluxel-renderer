@@ -114,7 +114,7 @@ pub(super) fn recording_error(
             texture_slot: None,
             buffer_slot: None,
             detail: detail.into(),
-            capabilities: None,
+            unsupported: None,
         },
     }
 }

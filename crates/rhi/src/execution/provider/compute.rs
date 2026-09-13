@@ -70,7 +70,7 @@ pub(crate) fn provider_error(
             texture_slot: None,
             buffer_slot: None,
             detail: detail.into(),
-            capabilities: None,
+            unsupported: None,
         },
     }
 }

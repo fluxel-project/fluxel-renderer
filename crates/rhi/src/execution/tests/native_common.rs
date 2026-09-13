@@ -137,7 +137,7 @@ fn no_object() -> RecordingError {
             texture_slot: None,
             buffer_slot: None,
             detail: "copy fixture has no render objects".into(),
-            capabilities: None,
+            unsupported: None,
         },
     }
 }

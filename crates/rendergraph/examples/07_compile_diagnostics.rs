@@ -1,8 +1,8 @@
 //! Compile-only diagnostics example; run with `cargo run --example 07_compile_diagnostics`.
 //! Execute callbacks are retained but are not invoked by `compile`.
 //!
-//! This example only proves that callers can type-match stable diagnostic kinds.
-//! It demonstrates matching the implemented compiler's stable error kinds.
+//! This example proves that callers can type-match stable diagnostic kinds and
+//! inspect structured capability requirements without parsing error strings.
 
 mod common;
 
@@ -21,8 +21,21 @@ fn inspect(result: CompileResult) {
             | CompileErrorKind::InvalidSubresourceRange
             | CompileErrorKind::DependencyCycle
             | CompileErrorKind::MissingImportContract
-            | CompileErrorKind::UnsupportedSemanticRequirement
-            | CompileErrorKind::InvalidExportOrPresent => {}
+            | CompileErrorKind::UnsupportedSemanticRequirement => {
+                if let Some(unsupported) = error.context.unsupported {
+                    match unsupported.requirement {
+                        CapabilityRequirement::Queue { .. }
+                        | CapabilityRequirement::QueueConfiguration
+                        | CapabilityRequirement::ColorAttachmentCount { .. }
+                        | CapabilityRequirement::BufferState { .. }
+                        | CapabilityRequirement::TextureFormat { .. }
+                        | CapabilityRequirement::TextureState { .. }
+                        | CapabilityRequirement::Surface { .. } => {}
+                        _ => {}
+                    }
+                }
+            }
+            CompileErrorKind::InvalidExportOrPresent => {}
             _ => {}
         },
     }
