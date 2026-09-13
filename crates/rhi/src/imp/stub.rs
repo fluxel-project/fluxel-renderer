@@ -321,6 +321,7 @@ pub(crate) fn begin_raster(
     _: Option<[f32; 4]>,
     _: bool,
     _: bool,
+    _: Option<(&OwnedTexture, TextureDesc, Option<f32>, bool)>,
     _: &str,
 ) -> Result<(), String> {
     Err("native raster is only supported on Windows".into())

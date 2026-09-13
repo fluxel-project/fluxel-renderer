@@ -20,9 +20,15 @@ pub(crate) const fn raster_vertex_minimum_size(kernel: crate::RasterKernel, slot
     }
 }
 
-/// Begins the sole supported color pass. `clear=Some` selects clear; otherwise
-/// `load` selects Load and false selects DontCare. `store=false` is explicit
-/// discard. The safe caller validates the attachment's full D2 Rgba8 range.
+/// Begins the fixed color pass and its optional Depth32Float attachment.
+///
+/// Both attachment views are retained until the closed command buffer reaches
+/// a terminal outcome. The safe caller has already constrained these to whole,
+/// single-sample D2 views with matching extents.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the private native boundary receives separately validated color and optional depth attachment facts"
+)]
 pub(crate) fn begin_raster(
     encoder: &mut CopyEncoder,
     texture: &OwnedTexture,
@@ -30,6 +36,7 @@ pub(crate) fn begin_raster(
     clear: Option<[f32; 4]>,
     load: bool,
     store: bool,
+    depth: Option<(&OwnedTexture, TextureDesc, Option<f32>, bool)>,
     label: &str,
 ) -> Result<(), String> {
     if encoder.active_render_view.is_some() {
@@ -40,6 +47,11 @@ pub(crate) fn begin_raster(
     encoder.active_raster_pipeline = None;
     if !Arc::ptr_eq(&encoder.owner, &texture.owner) {
         return Err("raster attachment belongs to another native device".into());
+    }
+    if let Some((depth_texture, _, _, _)) = depth
+        && !Arc::ptr_eq(&encoder.owner, &depth_texture.owner)
+    {
+        return Err("depth attachment belongs to another native device".into());
     }
     let expected_state = if load {
         ResourceAccessState::ColorAttachmentReadWrite
@@ -56,6 +68,24 @@ pub(crate) fn begin_raster(
         return Err(format!(
             "raster attachment requires encoder state {expected_state:?}"
         ));
+    }
+    if let Some((depth_texture, _, _, depth_load)) = depth {
+        let expected_state = if depth_load {
+            ResourceAccessState::DepthStencilReadWrite
+        } else {
+            ResourceAccessState::DepthStencilWrite
+        };
+        let key = TextureStateKey {
+            allocation: core::ptr::from_ref(depth_texture).addr(),
+            mip_level: 0,
+            array_layer: 0,
+            aspect: TextureAspect::Depth,
+        };
+        if encoder.texture_states.get(&key).copied() != Some(expected_state) {
+            return Err(format!(
+                "depth attachment requires encoder state {expected_state:?}"
+            ));
+        }
     }
     let ops = match clear {
         Some(_) => wgpu_hal::AttachmentOps::LOAD_CLEAR,
@@ -74,6 +104,19 @@ pub(crate) fn begin_raster(
         usage: wgt::TextureUses::COLOR_TARGET,
         range: wgt::ImageSubresourceRange {
             aspect: wgt::TextureAspect::All,
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            base_array_layer: 0,
+            array_layer_count: Some(1),
+        },
+    };
+    let depth_view_desc = wgpu_hal::TextureViewDescriptor {
+        label: Some("fluxel fixed raster depth view"),
+        format: wgt::TextureFormat::Depth32Float,
+        dimension: wgt::TextureViewDimension::D2,
+        usage: wgt::TextureUses::DEPTH_STENCIL_WRITE,
+        range: wgt::ImageSubresourceRange {
+            aspect: wgt::TextureAspect::DepthOnly,
             base_mip_level: 0,
             mip_level_count: Some(1),
             base_array_layer: 0,
@@ -102,6 +145,35 @@ pub(crate) fn begin_raster(
                 device.create_texture_view(texture, &view_desc)
             }
             .map_err(|e| format!("DX12 raster view creation failed: {e}"))?;
+            let depth_view = match depth {
+                Some((depth_texture, _, depth_clear, depth_load)) => {
+                    let Some(NativeTexture::Dx12(depth_texture)) = depth_texture.native.as_ref()
+                    else {
+                        unsafe { device.destroy_texture_view(view) };
+                        return Err("depth attachment belongs to another native backend".into());
+                    };
+                    // SAFETY: the validated depth texture and retained device
+                    // have the same native lineage, matching the color view.
+                    let depth_view = match unsafe {
+                        device.create_texture_view(depth_texture, &depth_view_desc)
+                    } {
+                        Ok(view) => view,
+                        Err(error) => {
+                            // SAFETY: depth view creation failed, so the color
+                            // view is unreferenced and must be consumed here.
+                            unsafe { device.destroy_texture_view(view) };
+                            return Err(format!("DX12 depth view creation failed: {error}"));
+                        }
+                    };
+                    let depth_ops = match depth_clear {
+                        Some(_) => wgpu_hal::AttachmentOps::LOAD_CLEAR,
+                        None if depth_load => wgpu_hal::AttachmentOps::LOAD,
+                        None => wgpu_hal::AttachmentOps::LOAD_DONT_CARE,
+                    } | wgpu_hal::AttachmentOps::STORE;
+                    Some((depth_view, depth_ops, depth_clear.unwrap_or(0.0)))
+                }
+                None => None,
+            };
             let colors = [Some(wgpu_hal::ColorAttachment {
                 target: wgpu_hal::Attachment {
                     view: &view,
@@ -125,7 +197,17 @@ pub(crate) fn begin_raster(
                     extent,
                     sample_count: 1,
                     color_attachments: &colors,
-                    depth_stencil_attachment: None,
+                    depth_stencil_attachment: depth_view.as_ref().map(|(view, ops, clear)| {
+                        wgpu_hal::DepthStencilAttachment {
+                            target: wgpu_hal::Attachment {
+                                view,
+                                usage: wgt::TextureUses::DEPTH_STENCIL_WRITE,
+                            },
+                            depth_ops: *ops,
+                            stencil_ops: wgpu_hal::AttachmentOps::empty(),
+                            clear_value: (*clear, 0),
+                        }
+                    }),
                     multiview_mask: None,
                     timestamp_writes: None,
                     occlusion_query_set: None,
@@ -134,11 +216,17 @@ pub(crate) fn begin_raster(
                 unsafe {
                     // SAFETY: begin failed and did not retain the uniquely owned
                     // same-device view, so it may be destroyed immediately.
-                    device.destroy_texture_view(view)
+                    device.destroy_texture_view(view);
+                    if let Some((depth, _, _)) = depth_view {
+                        device.destroy_texture_view(depth);
+                    }
                 };
                 return Err(format!("DX12 begin raster pass failed: {e}"));
             }
-            encoder.active_render_view = Some(NativeRenderView::Dx12(view));
+            encoder.active_render_view = Some(NativeRenderView::Dx12 {
+                color: view,
+                depth: depth_view.map(|(view, _, _)| view),
+            });
         }
         #[cfg(feature = "vulkan")]
         (
@@ -152,6 +240,35 @@ pub(crate) fn begin_raster(
                 device.create_texture_view(texture, &view_desc)
             }
             .map_err(|e| format!("Vulkan raster view creation failed: {e}"))?;
+            let depth_view = match depth {
+                Some((depth_texture, _, depth_clear, depth_load)) => {
+                    let Some(NativeTexture::Vulkan(depth_texture)) = depth_texture.native.as_ref()
+                    else {
+                        unsafe { device.destroy_texture_view(view) };
+                        return Err("depth attachment belongs to another native backend".into());
+                    };
+                    // SAFETY: the validated depth texture and retained device
+                    // have the same native lineage, matching the color view.
+                    let depth_view = match unsafe {
+                        device.create_texture_view(depth_texture, &depth_view_desc)
+                    } {
+                        Ok(view) => view,
+                        Err(error) => {
+                            // SAFETY: depth view creation failed, so the color
+                            // view is unreferenced and must be consumed here.
+                            unsafe { device.destroy_texture_view(view) };
+                            return Err(format!("Vulkan depth view creation failed: {error}"));
+                        }
+                    };
+                    let depth_ops = match depth_clear {
+                        Some(_) => wgpu_hal::AttachmentOps::LOAD_CLEAR,
+                        None if depth_load => wgpu_hal::AttachmentOps::LOAD,
+                        None => wgpu_hal::AttachmentOps::LOAD_DONT_CARE,
+                    } | wgpu_hal::AttachmentOps::STORE;
+                    Some((depth_view, depth_ops, depth_clear.unwrap_or(0.0)))
+                }
+                None => None,
+            };
             let colors = [Some(wgpu_hal::ColorAttachment {
                 target: wgpu_hal::Attachment {
                     view: &view,
@@ -175,7 +292,17 @@ pub(crate) fn begin_raster(
                     extent,
                     sample_count: 1,
                     color_attachments: &colors,
-                    depth_stencil_attachment: None,
+                    depth_stencil_attachment: depth_view.as_ref().map(|(view, ops, clear)| {
+                        wgpu_hal::DepthStencilAttachment {
+                            target: wgpu_hal::Attachment {
+                                view,
+                                usage: wgt::TextureUses::DEPTH_STENCIL_WRITE,
+                            },
+                            depth_ops: *ops,
+                            stencil_ops: wgpu_hal::AttachmentOps::empty(),
+                            clear_value: (*clear, 0),
+                        }
+                    }),
                     multiview_mask: None,
                     timestamp_writes: None,
                     occlusion_query_set: None,
@@ -184,11 +311,17 @@ pub(crate) fn begin_raster(
                 unsafe {
                     // SAFETY: failed begin left this same-device view
                     // unreferenced; it is consumed exactly once here.
-                    device.destroy_texture_view(view)
+                    device.destroy_texture_view(view);
+                    if let Some((depth, _, _)) = depth_view {
+                        device.destroy_texture_view(depth);
+                    }
                 };
                 return Err(format!("Vulkan begin raster pass failed: {e}"));
             }
-            encoder.active_render_view = Some(NativeRenderView::Vulkan(view));
+            encoder.active_render_view = Some(NativeRenderView::Vulkan {
+                color: view,
+                depth: depth_view.map(|(view, _, _)| view),
+            });
         }
         _ => return Err("raster attachment belongs to another native backend".into()),
     }
@@ -209,7 +342,7 @@ pub(crate) fn end_raster(encoder: &mut CopyEncoder) -> Result<(), String> {
         (
             NativeEncoder::Dx12(command),
             NativeDevice::Dx12 { .. },
-            view @ NativeRenderView::Dx12(_),
+            view @ NativeRenderView::Dx12 { .. },
         ) => unsafe {
             // SAFETY: the safe layer established one active raster pass; its
             // view is moved into command-buffer retention after this call.
@@ -220,7 +353,7 @@ pub(crate) fn end_raster(encoder: &mut CopyEncoder) -> Result<(), String> {
         (
             NativeEncoder::Vulkan(command),
             NativeDevice::Vulkan { .. },
-            view @ NativeRenderView::Vulkan(_),
+            view @ NativeRenderView::Vulkan { .. },
         ) => unsafe {
             // SAFETY: same active-pass and retained-view proof as DX12.
             command.end_render_pass();
@@ -243,24 +376,42 @@ pub(crate) fn set_raster_pipeline(
     if encoder.active_render_view.is_none() {
         return Err("raster pipeline requires an active raster pass".into());
     }
+    let has_depth = match encoder.active_render_view.as_ref() {
+        #[cfg(feature = "dx12")]
+        Some(NativeRenderView::Dx12 { depth, .. }) => depth.is_some(),
+        #[cfg(feature = "vulkan")]
+        Some(NativeRenderView::Vulkan { depth, .. }) => depth.is_some(),
+        None => unreachable!("active raster view was checked above"),
+    };
     match (
         encoder.native.as_mut().expect("live encoder"),
         pipeline.0.native.as_ref(),
     ) {
         #[cfg(feature = "dx12")]
-        (NativeEncoder::Dx12(encoder), Some(NativeRasterPipelineInner::Dx12 { pipeline, .. })) => unsafe {
+        (
+            NativeEncoder::Dx12(encoder),
+            Some(NativeRasterPipelineInner::Dx12 {
+                pipeline,
+                depth_pipeline,
+                ..
+            }),
+        ) => unsafe {
             // SAFETY: safe checks prove same device and an active compatible
             // raster pass; the pipeline lease survives command completion.
-            encoder.set_render_pipeline(pipeline)
+            encoder.set_render_pipeline(if has_depth { depth_pipeline } else { pipeline })
         },
         #[cfg(feature = "vulkan")]
         (
             NativeEncoder::Vulkan(encoder),
-            Some(NativeRasterPipelineInner::Vulkan { pipeline, .. }),
+            Some(NativeRasterPipelineInner::Vulkan {
+                pipeline,
+                depth_pipeline,
+                ..
+            }),
         ) => unsafe {
             // SAFETY: same device, active-pass, compatibility, and lifetime
             // proof as the DX12 branch.
-            encoder.set_render_pipeline(pipeline)
+            encoder.set_render_pipeline(if has_depth { depth_pipeline } else { pipeline })
         },
         _ => return Err("raster pipeline belongs to another native backend".into()),
     };

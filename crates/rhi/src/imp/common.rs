@@ -126,9 +126,15 @@ pub(crate) enum NativeEncoder {
 
 pub(crate) enum NativeRenderView {
     #[cfg(feature = "dx12")]
-    Dx12(wgpu_hal::dx12::TextureView),
+    Dx12 {
+        color: wgpu_hal::dx12::TextureView,
+        depth: Option<wgpu_hal::dx12::TextureView>,
+    },
     #[cfg(feature = "vulkan")]
-    Vulkan(wgpu_hal::vulkan::TextureView),
+    Vulkan {
+        color: wgpu_hal::vulkan::TextureView,
+        depth: Option<wgpu_hal::vulkan::TextureView>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -146,15 +152,21 @@ pub(crate) fn destroy_render_views(owner: &OpenedDevice, views: Vec<NativeRender
     for view in views {
         match (&owner.native, view) {
             #[cfg(feature = "dx12")]
-            (NativeDevice::Dx12 { device, .. }, NativeRenderView::Dx12(view)) => unsafe {
+            (NativeDevice::Dx12 { device, .. }, NativeRenderView::Dx12 { color, depth }) => unsafe {
                 // SAFETY: the retained device created this uniquely consumed
                 // view, and its encoder was discarded or terminally reset.
-                device.destroy_texture_view(view)
+                device.destroy_texture_view(color);
+                if let Some(depth) = depth {
+                    device.destroy_texture_view(depth);
+                }
             },
             #[cfg(feature = "vulkan")]
-            (NativeDevice::Vulkan { device, .. }, NativeRenderView::Vulkan(view)) => unsafe {
+            (NativeDevice::Vulkan { device, .. }, NativeRenderView::Vulkan { color, depth }) => unsafe {
                 // SAFETY: same unique ownership and terminal-use proof as DX12.
-                device.destroy_texture_view(view)
+                device.destroy_texture_view(color);
+                if let Some(depth) = depth {
+                    device.destroy_texture_view(depth);
+                }
             },
             _ => unreachable!("render view and device backend always match"),
         }
@@ -254,6 +266,7 @@ pub(crate) enum NativeRasterPipelineInner {
         bind_group_layout: Option<wgpu_hal::dx12::BindGroupLayout>,
         pipeline_layout: wgpu_hal::dx12::PipelineLayout,
         pipeline: wgpu_hal::dx12::RenderPipeline,
+        depth_pipeline: wgpu_hal::dx12::RenderPipeline,
     },
     #[cfg(feature = "vulkan")]
     Vulkan {
@@ -262,6 +275,7 @@ pub(crate) enum NativeRasterPipelineInner {
         bind_group_layout: Option<wgpu_hal::vulkan::BindGroupLayout>,
         pipeline_layout: wgpu_hal::vulkan::PipelineLayout,
         pipeline: wgpu_hal::vulkan::RenderPipeline,
+        depth_pipeline: wgpu_hal::vulkan::RenderPipeline,
     },
 }
 

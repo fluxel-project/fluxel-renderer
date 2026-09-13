@@ -261,11 +261,13 @@ impl Drop for NativeRasterPipelineShared {
                     bind_group_layout,
                     pipeline_layout,
                     pipeline,
+                    depth_pipeline,
                 },
             ) => unsafe {
                 // SAFETY: `owner` created every object, remains live, and no
                 // in-flight lease exists when the shared owner reaches Drop.
                 device.destroy_render_pipeline(pipeline);
+                device.destroy_render_pipeline(depth_pipeline);
                 device.destroy_pipeline_layout(pipeline_layout);
                 if let Some(layout) = bind_group_layout {
                     device.destroy_bind_group_layout(layout);
@@ -282,11 +284,13 @@ impl Drop for NativeRasterPipelineShared {
                     bind_group_layout,
                     pipeline_layout,
                     pipeline,
+                    depth_pipeline,
                 },
             ) => unsafe {
                 // SAFETY: same retained-device, terminal-lifetime, and reverse
                 // dependency destruction proof as the DX12 branch.
                 device.destroy_render_pipeline(pipeline);
+                device.destroy_render_pipeline(depth_pipeline);
                 device.destroy_pipeline_layout(pipeline_layout);
                 if let Some(layout) = bind_group_layout {
                     device.destroy_bind_group_layout(layout);

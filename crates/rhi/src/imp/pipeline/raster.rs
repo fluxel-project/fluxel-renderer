@@ -201,6 +201,16 @@ pub(crate) fn create_raster_pipeline(
         &frame_uniform_entries
     };
     let constants = naga::back::PipelineConstants::default();
+    // Keep the public API closed: every fixed recipe has two private native
+    // realizations. The original one preserves color-only passes; this sibling
+    // realization is selected only while a Depth32Float attachment is active.
+    let depth_stencil = wgt::DepthStencilState {
+        format: wgt::TextureFormat::Depth32Float,
+        depth_write_enabled: Some(true),
+        depth_compare: Some(wgt::CompareFunction::LessEqual),
+        stencil: wgt::StencilState::default(),
+        bias: wgt::DepthBiasState::default(),
+    };
     let native = match &owner.native {
         #[cfg(feature = "dx12")]
         NativeDevice::Dx12 { device, .. } => {
@@ -361,12 +371,36 @@ pub(crate) fn create_raster_pipeline(
                     )));
                 }
             };
+            let mut depth_desc = desc;
+            depth_desc.depth_stencil = Some(depth_stencil.clone());
+            let depth_pipeline = match unsafe {
+                // SAFETY: this differs from the color-only fixed descriptor
+                // solely by the validated Depth32Float attachment contract.
+                device.create_render_pipeline(&depth_desc)
+            } {
+                Ok(value) => value,
+                Err(e) => {
+                    unsafe {
+                        device.destroy_render_pipeline(pipeline);
+                        device.destroy_pipeline_layout(layout);
+                        if let Some(bgl) = bind_group_layout {
+                            device.destroy_bind_group_layout(bgl);
+                        }
+                        device.destroy_shader_module(fragment_shader);
+                        device.destroy_shader_module(vertex_shader);
+                    }
+                    return Err(RasterPipelineCreateError::ShaderCompilation(format!(
+                        "DX12 depth raster pipeline creation failed: {e}"
+                    )));
+                }
+            };
             NativeRasterPipelineInner::Dx12 {
                 vertex_shader,
                 fragment_shader,
                 bind_group_layout,
                 pipeline_layout: layout,
                 pipeline,
+                depth_pipeline,
             }
         }
         #[cfg(feature = "vulkan")]
@@ -527,12 +561,36 @@ pub(crate) fn create_raster_pipeline(
                     )));
                 }
             };
+            let mut depth_desc = desc;
+            depth_desc.depth_stencil = Some(depth_stencil.clone());
+            let depth_pipeline = match unsafe {
+                // SAFETY: this is the fixed Depth32Float sibling of the
+                // already validated color-only recipe descriptor.
+                device.create_render_pipeline(&depth_desc)
+            } {
+                Ok(value) => value,
+                Err(e) => {
+                    unsafe {
+                        device.destroy_render_pipeline(pipeline);
+                        device.destroy_pipeline_layout(layout);
+                        if let Some(bgl) = bind_group_layout {
+                            device.destroy_bind_group_layout(bgl);
+                        }
+                        device.destroy_shader_module(fragment_shader);
+                        device.destroy_shader_module(vertex_shader);
+                    }
+                    return Err(RasterPipelineCreateError::ShaderCompilation(format!(
+                        "Vulkan depth raster pipeline creation failed: {e}"
+                    )));
+                }
+            };
             NativeRasterPipelineInner::Vulkan {
                 vertex_shader,
                 fragment_shader,
                 bind_group_layout,
                 pipeline_layout: layout,
                 pipeline,
+                depth_pipeline,
             }
         }
     };

@@ -137,7 +137,6 @@ impl ExecutionBackend for RasterBackend {
         if encoder.raster_extent.is_some()
             || encoder.compute_open
             || encoder.copy_open
-            || descriptor.depth_stencil.is_some()
             || descriptor.colors.len() != 1
         {
             return Err(NativeExecutionError::RasterStateMismatch);
@@ -172,6 +171,54 @@ impl ExecutionBackend for RasterBackend {
         if color.operations.store != StoreOp::Store {
             return Err(NativeExecutionError::RasterStateMismatch);
         }
+        let depth = descriptor
+            .depth_stencil
+            .as_ref()
+            .map(|attachment| {
+                self.check_texture(attachment.texture)?;
+                if attachment.range != TextureRange::Whole
+                    || attachment.stencil.is_some()
+                    || !attachment
+                        .texture
+                        .allowed_usage()
+                        .contains(TextureUsageKind::DepthStencilAttachment)
+                {
+                    return Err(NativeExecutionError::RasterStateMismatch);
+                }
+                let texture = attachment.texture.descriptor().texture;
+                if texture.dimension != fluxel_rendergraph::TextureDimension::D2
+                    || texture.format != TextureFormat::Depth32Float
+                    || texture.mip_levels != 1
+                    || texture.array_layers != 1
+                    || texture.sample_count != 1
+                    || texture.extent.depth != 1
+                    || texture.extent.width != color.texture.descriptor().texture.extent.width
+                    || texture.extent.height != color.texture.descriptor().texture.extent.height
+                {
+                    return Err(NativeExecutionError::RasterStateMismatch);
+                }
+                let operations = attachment
+                    .depth
+                    .ok_or(NativeExecutionError::RasterStateMismatch)?;
+                if let LoadOp::Clear(value) = operations.load
+                    && (!value.is_finite() || !(0.0..=1.0).contains(&value))
+                {
+                    return Err(NativeExecutionError::RasterStateMismatch);
+                }
+                if operations.store != StoreOp::Store
+                    || matches!(operations.load, LoadOp::DontCare)
+                        && operations.write_coverage != fluxel_rendergraph::WriteCoverage::Full
+                {
+                    return Err(NativeExecutionError::RasterStateMismatch);
+                }
+                let (clear, load) = match operations.load {
+                    LoadOp::Clear(value) => (Some(value), false),
+                    LoadOp::Load => (None, true),
+                    LoadOp::DontCare => (None, false),
+                };
+                Ok((attachment.texture, texture, clear, load))
+            })
+            .transpose()?;
         crate::imp::begin_raster(
             &mut encoder.native,
             color.texture.native(),
@@ -179,6 +226,9 @@ impl ExecutionBackend for RasterBackend {
             clear,
             load,
             true,
+            depth.map(|(texture, descriptor, clear, load)| {
+                (texture.native(), descriptor, clear, load)
+            }),
             descriptor.label,
         )
         .map_err(NativeExecutionError::Recording)?;
@@ -186,6 +236,9 @@ impl ExecutionBackend for RasterBackend {
         // vertex/index readiness here could let a later pass satisfy its
         // validation from native state recorded for the previous pass.
         encoder.leases.push(color.texture.lease().into());
+        if let Some((texture, _, _, _)) = depth {
+            encoder.leases.push(texture.lease().into());
+        }
         encoder.raster_extent = Some((texture.extent.width, texture.extent.height));
         encoder.active_raster = None;
         encoder.vertex_buffer = None;

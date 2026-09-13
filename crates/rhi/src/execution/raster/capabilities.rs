@@ -157,5 +157,12 @@ pub(in crate::execution) fn raster_capabilities_from_limit_and_filterability(
                 .copies(true, true)
                 .build(),
         )
+        .texture_format(
+            // The native raster pass creates a Depth32Float D2 view and the
+            // fixed depth-pipeline sibling declares exactly this format.
+            TextureFormatCapabilities::builder(TextureFormat::Depth32Float)
+                .attachments(false, true, vec![1])
+                .build(),
+        )
         .build()
 }

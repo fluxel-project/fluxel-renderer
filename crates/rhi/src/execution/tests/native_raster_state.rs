@@ -47,7 +47,7 @@ pub(super) fn run_raster_negative_paths(backend_kind: crate::Backend) {
     let pipeline = device
         .create_raster_pipeline(crate::RasterKernel::IndexedPositionColor)
         .unwrap();
-    let _triangle = device
+    let triangle = device
         .create_raster_pipeline(crate::RasterKernel::Triangle)
         .unwrap();
     let camera_pipeline = device
@@ -339,6 +339,30 @@ pub(super) fn run_raster_negative_paths(backend_kind: crate::Backend) {
     };
     let mismatch = NativeExecutionError::RasterStateMismatch;
     let mut backend = RasterBackend::new(device.clone());
+    let depth_descriptor = TextureDesc {
+        dimension: fluxel_rendergraph::TextureDimension::D2,
+        extent: Extent3d {
+            width: 8,
+            height: 8,
+            depth: 1,
+        },
+        mip_levels: 1,
+        array_layers: 1,
+        sample_count: 1,
+        format: TextureFormat::Depth32Float,
+    };
+    let depth_target = device
+        .create_texture(TextureDescriptor {
+            texture: depth_descriptor,
+            usage: TextureUsage::from_kinds([TextureUsageKind::DepthStencilAttachment]),
+            memory: MemoryPolicy::DeviceOnly,
+        })
+        .unwrap();
+    let depth_ops = AttachmentOps {
+        load: LoadOp::Clear(0.5),
+        store: StoreOp::Store,
+        write_coverage: WriteCoverage::Full,
+    };
 
     // All malformed pass descriptors fail before opening a native render pass.
     let foreign_color = raster_negative_color(&foreign_target);
@@ -497,6 +521,121 @@ pub(super) fn run_raster_negative_paths(backend_kind: crate::Backend) {
         ),
         Err(mismatch.clone())
     );
+    // Every depth descriptor fact is rejected by the safe adapter before a
+    // native pass opens. These deliberately use an encoder without depth
+    // transitions: a valid descriptor would subsequently require the tracked
+    // DepthStencilWrite/ReadWrite state, while each case below must fail first.
+    let depth_without_usage = device
+        .create_texture(TextureDescriptor {
+            texture: depth_descriptor,
+            usage: TextureUsage::from_kinds([TextureUsageKind::CopySource]),
+            memory: MemoryPolicy::DeviceOnly,
+        })
+        .unwrap();
+    let depth_wrong_extent = device
+        .create_texture(TextureDescriptor {
+            texture: TextureDesc {
+                extent: Extent3d {
+                    width: 4,
+                    height: 8,
+                    depth: 1,
+                },
+                ..depth_descriptor
+            },
+            usage: TextureUsage::from_kinds([TextureUsageKind::DepthStencilAttachment]),
+            memory: MemoryPolicy::DeviceOnly,
+        })
+        .unwrap();
+    for attachment in [
+        RasterDepthStencilAttachment {
+            texture: &depth_without_usage,
+            range: TextureRange::Whole,
+            depth: Some(depth_ops),
+            stencil: None,
+        },
+        RasterDepthStencilAttachment {
+            texture: &depth_target,
+            range: TextureRange::Subresources {
+                base_mip_level: 0,
+                mip_level_count: 1,
+                base_array_layer: 0,
+                array_layer_count: 1,
+                aspect: fluxel_rendergraph::TextureAspect::Depth,
+            },
+            depth: Some(depth_ops),
+            stencil: None,
+        },
+        RasterDepthStencilAttachment {
+            texture: &target,
+            range: TextureRange::Whole,
+            depth: Some(depth_ops),
+            stencil: None,
+        },
+        RasterDepthStencilAttachment {
+            texture: &depth_wrong_extent,
+            range: TextureRange::Whole,
+            depth: Some(depth_ops),
+            stencil: None,
+        },
+        RasterDepthStencilAttachment {
+            texture: &depth_target,
+            range: TextureRange::Whole,
+            depth: None,
+            stencil: Some(AttachmentOps {
+                load: LoadOp::Clear(0),
+                store: StoreOp::Store,
+                write_coverage: WriteCoverage::Full,
+            }),
+        },
+        RasterDepthStencilAttachment {
+            texture: &depth_target,
+            range: TextureRange::Whole,
+            depth: None,
+            stencil: None,
+        },
+        RasterDepthStencilAttachment {
+            texture: &depth_target,
+            range: TextureRange::Whole,
+            depth: Some(AttachmentOps {
+                load: LoadOp::DontCare,
+                store: StoreOp::Store,
+                write_coverage: WriteCoverage::Unknown,
+            }),
+            stencil: None,
+        },
+        RasterDepthStencilAttachment {
+            texture: &depth_target,
+            range: TextureRange::Whole,
+            depth: Some(AttachmentOps {
+                load: LoadOp::Clear(f32::NAN),
+                store: StoreOp::Store,
+                write_coverage: WriteCoverage::Full,
+            }),
+            stencil: None,
+        },
+        RasterDepthStencilAttachment {
+            texture: &depth_target,
+            range: TextureRange::Whole,
+            depth: Some(AttachmentOps {
+                load: LoadOp::Clear(1.01),
+                store: StoreOp::Store,
+                write_coverage: WriteCoverage::Full,
+            }),
+            stencil: None,
+        },
+    ] {
+        assert_eq!(
+            backend.begin_raster(
+                &mut encoder,
+                &RasterPassDescriptor {
+                    label: "invalid-depth",
+                    colors: std::slice::from_ref(&color),
+                    depth_stencil: Some(attachment),
+                }
+            ),
+            Err(mismatch.clone())
+        );
+    }
     let depth = RasterDepthStencilAttachment {
         texture: &target,
         range: TextureRange::Whole,
@@ -529,6 +668,213 @@ pub(super) fn run_raster_negative_paths(backend_kind: crate::Backend) {
         Err(mismatch.clone())
     );
     drop(encoder);
+
+    // Native proof for the minimal depth path: a fixed-recipe draw uses the
+    // private Depth32Float pipeline sibling, while both attachments remain
+    // retained through submission without caller-owned texture handles.
+    let retained_color = device
+        .create_texture(TextureDescriptor {
+            texture: target_descriptor,
+            usage: TextureUsage::from_kinds([TextureUsageKind::ColorAttachment]),
+            memory: MemoryPolicy::DeviceOnly,
+        })
+        .unwrap();
+    let retained_depth = device
+        .create_texture(TextureDescriptor {
+            texture: depth_descriptor,
+            usage: TextureUsage::from_kinds([TextureUsageKind::DepthStencilAttachment]),
+            memory: MemoryPolicy::DeviceOnly,
+        })
+        .unwrap();
+    let depth_clear = RasterDepthStencilAttachment {
+        texture: &retained_depth,
+        range: TextureRange::Whole,
+        depth: Some(depth_ops),
+        stencil: None,
+    };
+    let color_clear = RasterColorAttachment {
+        index: 0,
+        texture: &retained_color,
+        range: TextureRange::Whole,
+        operations: AttachmentOps {
+            load: LoadOp::Clear([0.0, 0.0, 0.0, 1.0]),
+            store: StoreOp::Store,
+            write_coverage: WriteCoverage::Full,
+        },
+    };
+    let mut encoder = backend.begin_encoder(QueueId::new(0)).unwrap();
+    backend
+        .transition_texture(
+            &mut encoder,
+            &retained_color,
+            TextureRange::Whole,
+            ResourceAccessState::Undefined,
+            ResourceAccessState::ColorAttachmentWrite,
+        )
+        .unwrap();
+    backend
+        .transition_texture(
+            &mut encoder,
+            &retained_depth,
+            TextureRange::Whole,
+            ResourceAccessState::Undefined,
+            ResourceAccessState::DepthStencilWrite,
+        )
+        .unwrap();
+    backend
+        .begin_raster(
+            &mut encoder,
+            &RasterPassDescriptor {
+                label: "depth-clear-store",
+                colors: std::slice::from_ref(&color_clear),
+                depth_stencil: Some(depth_clear),
+            },
+        )
+        .unwrap();
+    backend
+        .set_raster_pipeline(&mut encoder, &triangle)
+        .unwrap();
+    backend.draw(&mut encoder, 0..3, 0..1).unwrap();
+    backend.end_raster(&mut encoder).unwrap();
+    let command = backend.finish_encoder(encoder).unwrap();
+    drop(retained_color);
+    drop(retained_depth);
+    let completion = backend
+        .submit(QueueId::new(0), command, Vec::new())
+        .unwrap();
+    backend
+        .wait(&completion, std::time::Duration::from_secs(10))
+        .unwrap();
+    assert_eq!(
+        backend.completion_status(&completion),
+        CompletionStatus::Complete
+    );
+    assert!(crate::imp::validation_diagnostics(&device.inner).is_empty());
+
+    // A separate two-submission witness proves Load selects the read/write
+    // depth state rather than treating it like a clear. The first submission
+    // establishes stored contents; the second transitions from that exact
+    // outgoing state before recording Load plus a real fixed-recipe draw.
+    let initial_depth = RasterDepthStencilAttachment {
+        texture: &depth_target,
+        range: TextureRange::Whole,
+        depth: Some(depth_ops),
+        stencil: None,
+    };
+    let initial_color = RasterColorAttachment {
+        index: 0,
+        texture: &target,
+        range: TextureRange::Whole,
+        operations: AttachmentOps {
+            load: LoadOp::Clear([0.0, 0.0, 0.0, 1.0]),
+            store: StoreOp::Store,
+            write_coverage: WriteCoverage::Full,
+        },
+    };
+    let mut encoder = backend.begin_encoder(QueueId::new(0)).unwrap();
+    backend
+        .transition_texture(
+            &mut encoder,
+            &target,
+            TextureRange::Whole,
+            ResourceAccessState::Undefined,
+            ResourceAccessState::ColorAttachmentWrite,
+        )
+        .unwrap();
+    backend
+        .transition_texture(
+            &mut encoder,
+            &depth_target,
+            TextureRange::Whole,
+            ResourceAccessState::Undefined,
+            ResourceAccessState::DepthStencilWrite,
+        )
+        .unwrap();
+    backend
+        .begin_raster(
+            &mut encoder,
+            &RasterPassDescriptor {
+                label: "depth-initialize-for-load",
+                colors: std::slice::from_ref(&initial_color),
+                depth_stencil: Some(initial_depth),
+            },
+        )
+        .unwrap();
+    backend
+        .set_raster_pipeline(&mut encoder, &triangle)
+        .unwrap();
+    backend.draw(&mut encoder, 0..3, 0..1).unwrap();
+    backend.end_raster(&mut encoder).unwrap();
+    let command = backend.finish_encoder(encoder).unwrap();
+    let completion = backend
+        .submit(QueueId::new(0), command, Vec::new())
+        .unwrap();
+    backend
+        .wait(&completion, std::time::Duration::from_secs(10))
+        .unwrap();
+
+    let loaded_depth = RasterDepthStencilAttachment {
+        texture: &depth_target,
+        range: TextureRange::Whole,
+        depth: Some(AttachmentOps {
+            load: LoadOp::Load,
+            store: StoreOp::Store,
+            write_coverage: WriteCoverage::Unknown,
+        }),
+        stencil: None,
+    };
+    let loaded_color = RasterColorAttachment {
+        index: 0,
+        texture: &target,
+        range: TextureRange::Whole,
+        operations: raster_negative_ops(),
+    };
+    let mut encoder = backend.begin_encoder(QueueId::new(0)).unwrap();
+    backend
+        .transition_texture(
+            &mut encoder,
+            &target,
+            TextureRange::Whole,
+            ResourceAccessState::ColorAttachmentWrite,
+            ResourceAccessState::ColorAttachmentReadWrite,
+        )
+        .unwrap();
+    backend
+        .transition_texture(
+            &mut encoder,
+            &depth_target,
+            TextureRange::Whole,
+            ResourceAccessState::DepthStencilWrite,
+            ResourceAccessState::DepthStencilReadWrite,
+        )
+        .unwrap();
+    backend
+        .begin_raster(
+            &mut encoder,
+            &RasterPassDescriptor {
+                label: "depth-load-store",
+                colors: std::slice::from_ref(&loaded_color),
+                depth_stencil: Some(loaded_depth),
+            },
+        )
+        .unwrap();
+    backend
+        .set_raster_pipeline(&mut encoder, &triangle)
+        .unwrap();
+    backend.draw(&mut encoder, 0..3, 0..1).unwrap();
+    backend.end_raster(&mut encoder).unwrap();
+    let command = backend.finish_encoder(encoder).unwrap();
+    let completion = backend
+        .submit(QueueId::new(0), command, Vec::new())
+        .unwrap();
+    backend
+        .wait(&completion, std::time::Duration::from_secs(10))
+        .unwrap();
+    assert_eq!(
+        backend.completion_status(&completion),
+        CompletionStatus::Complete
+    );
+    assert!(crate::imp::validation_diagnostics(&device.inner).is_empty());
 
     let no_attachment_usage = device
         .create_texture(TextureDescriptor {

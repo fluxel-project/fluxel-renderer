@@ -59,6 +59,15 @@ fn raster_profile_is_single_queue_raster_compute_copy_rgba8() {
         .unwrap();
     assert!(rgba8.color_attachment && rgba8.sampled && rgba8.copy_source);
     assert_eq!(rgba8.attachment_sample_counts, vec![1]);
+    let depth = capabilities
+        .texture_formats
+        .iter()
+        .find(|facts| facts.format == TextureFormat::Depth32Float)
+        .expect("Depth32Float fixed raster format");
+    assert!(depth.depth_stencil_attachment);
+    assert_eq!(depth.attachment_sample_counts, vec![1]);
+    assert!(!depth.sampled && !depth.storage_read && !depth.storage_write);
+    assert!(!depth.copy_source && !depth.copy_destination);
 }
 
 #[test]
