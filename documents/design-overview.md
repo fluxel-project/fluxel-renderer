@@ -29,7 +29,7 @@ It is not a general graphics API, a scene/asset database, a shader authoring
 framework, or a presentation runtime. In particular, there is currently no
 general pipeline or bind-group builder, general shader reflection API,
 cross-platform surface abstraction, multi-queue scheduler, transient aliasing
-implementation, or stable asset/resource handle and cache ABI. The proven
+implementation, or stable public asset/resource handle and cache ABI. The proven
 Windows presentation slice supports DX12 and Vulkan through one narrow RHI
 surface façade. It handles resize/minimize/restore as generation changes and
 independent acquired-frame tickets, while the harness privately proves bounded
@@ -53,18 +53,21 @@ never become graph concepts.
 
 | Layer | Owns | Explicitly does not own |
 | --- | --- | --- |
-| `fluxel-renderer` | Domain inputs, renderer policy, GPU snapshot publication, fixed frame coordination, closed recipes, and the visible fixed-frame transaction | Asset loading/cache identity, graph compilation, native handles, barriers, swapchains, or host/window policy |
+| `fluxel-renderer` | Domain inputs, renderer policy, fixed per-device GPU residency, GPU snapshot publication, fixed frame coordination, closed recipes, and the visible fixed-frame transaction | Logical asset loading/cache identity, graph compilation, native handles, barriers, swapchains, or host/window policy |
 | `fluxel-rendergraph` | Logical resources and versions, declared accesses, validation, dependencies, culling, transitions, and immutable execution plans | Scenes, asset handles, shader/pipeline policy, allocation, native handles, queue submission, or readback implementation |
 | `fluxel-rhi` | Device-affine native resources, opaque artifacts/bindings, backend lowering, command recording, submission, completion, native diagnostics, and surface/swapchain presentation | Scene selection, asset policy, host/window ownership, general renderer lowering, or a public general graphics API |
 
 Assets cross a repository boundary without moving platform or GPU policy into
-one shared crate. `fluxel-bases` owns durable identity, typed handles,
-generations, loading state, caching, and reuse contracts. Platform readers live
-in `fluxel-host` or `fluxel-jsbridge`; rendering-side adapters own GPU upload,
-residency, recreation, and frame-safe retirement. The renderer resolves an
-appropriate GPU-ready snapshot for a frame. RenderGraph receives only the
-resulting physical binding and its contract. The reason for this boundary is
-recorded in [ADR-0001](adr/0001-assets-outside-rendergraph.md). The native
+one shared crate. `fluxel-bases` owns durable logical identity, typed handles,
+content generations, loading state, and logical caching/reuse contracts.
+Platform readers live in `fluxel-host` or `fluxel-jsbridge`; this workspace
+owns only renderer-private, per-device GPU residency: fixed upload, recreation,
+and frame-safe retirement. The renderer resolves an appropriate GPU-ready
+snapshot by `(AssetId, ContentGeneration, DeviceIdentity)` during preparation,
+before it declares the frame. RenderGraph receives only the resulting physical
+binding and its contract. The reason for this boundary is recorded in
+[ADR-0001](adr/0001-assets-outside-rendergraph.md) and
+[ADR-0010](adr/0010-renderer-private-fixed-asset-residency.md). The native
 containment boundary is recorded in
 [ADR-0002](adr/0002-rhi-unsafe-containment.md).
 
@@ -77,7 +80,8 @@ The intended frame path has a stable conceptual shape:
 
 ```text
 application scene/domain data
-  -> renderer resolves ready GPU snapshots and frame policy
+  -> renderer preparation resolves/starts fixed GPU residency
+  -> renderer polls and selects only committed GPU snapshots and frame policy
   -> ordered render packet or closed fixed recipe
   -> acquire one RHI presentable image when presentation is requested
   -> RenderGraph declarations
@@ -93,6 +97,17 @@ Application code supplies domain data such as cameras, geometry, materials, and
 an insertion-ordered `DrawList`. A renderer decides which snapshot generation,
 material behavior, and ordering policy are legal for the frame. Persistent CPU
 data is validated before it enters the asynchronous GPU path.
+
+For the fixed 0.14 residency domains, preparation receives an immutable
+`AssetSnapshot` and keys its private entry by `(AssetId, ContentGeneration,
+DeviceIdentity)`. Pending uploads are not drawable; only a committed entry is
+bound as a concrete graph import. Supersession, eviction, or device recreation
+moves an old entry to retirement, where its RHI leases retain it until terminal
+submission completion. A pass never receives `AssetStore`, and neither
+RenderGraph nor the general/native RHI gains an asset/cache handle or a shader
+generalization. The sibling `fluxel-rendering-wasm` adapter alone exposes a
+closed experimental browser-residency seam with opaque tokens; those are not
+graph or native RHI handles.
 
 The current renderer has deliberately narrow fixed paths: immutable
 indexed mesh, texture, normal, and vertex-color snapshots are published only
@@ -181,7 +196,7 @@ The workspace keeps three lifetimes separate.
 
 | Lifetime | Examples | Owner and rule |
 | --- | --- | --- |
-| Persistent domain lifetime | Geometry, material inputs, asset identity, renderer caches | Application/asset/renderer policy; not graph state |
+| Persistent domain lifetime | Geometry, material inputs, logical asset identity, renderer-private GPU residency metadata | Application/asset/renderer policy; not graph state |
 | Per-frame logical lifetime | Graph versions, imports, exports, frame inputs, retained pass recipes | RenderGraph declaration/instantiation; a compiled plan contains no native per-frame object |
 | Native asynchronous lifetime | Device, buffers, textures, pipelines, bindings, staging data, command objects, leases, completion handles | RHI; objects survive until the relevant work is proven retired |
 
@@ -297,8 +312,15 @@ read limitation and fails closed; WebGPU read is not promised. WebGL2 rejects
 compute and every storage operation with structured capability evidence before
 context/resource side effects, with no emulation. WebGPU separately owns a
 private device-generation/canvas-epoch state machine, opaque per-key resource
-registry, ticket-held leases, asynchronous recovery, and terminal disposal;
-that browser-only contract does not broaden native Surface.
+registry, ticket-held leases, asynchronous recovery, and terminal disposal.
+In normal browser rendering, a committed resident mesh is reused only for its
+current device generation. Replacing content does not mutate an old token: that
+token remains safe for its own in-flight work within the same generation while
+the replacement uses a new content-generation entry. Generation loss removes
+old entries from lookup and reuploads retained CPU snapshots for the replacement
+generation. An image registry may exist for the same residency bookkeeping, but
+the legacy-unlit browser path does not claim to sample a resident image; that
+browser-only contract does not broaden native Surface.
 
 Windows MSVC is the primary Windows development/native test environment. Linux
 must be tested natively (for example in WSL2/Ubuntu), because it exercises

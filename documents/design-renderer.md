@@ -55,15 +55,17 @@ Renderer code sees only safe opaque RHI types and the explicitly provisional
 `adapter::fixed_artifacts::RasterBackend`/`RasterKernel` contract.
 
 Persistent asset identity, loading, cache eviction, and hot reload are outside
-the graph. An asset system may resolve a ready GPU generation before frame
-construction, but it is not a graph node or graph resource owner. See
-[ADR-0001](adr/0001-assets-outside-rendergraph.md).
+the graph. The 0.14 renderer-private residency layer may resolve a fixed
+renderer GPU generation before frame construction, but it is not a graph node
+or graph resource owner. See [ADR-0001](adr/0001-assets-outside-rendergraph.md)
+and [ADR-0010](adr/0010-renderer-private-fixed-asset-residency.md).
 
 ## Non-goals and current limits
 
 The current renderer intentionally has no:
 
-- stable asset/resource handles or cache;
+- stable public asset/resource handles, a general asset cache, or a generic
+  resource-residency protocol;
 - arbitrary shaders, reflection, pipeline layouts, bindings, vertex layouts,
   samplers, views, or material parameters;
 - transformed-normal Lambert shading, lights, depth, blending, culling,
@@ -416,6 +418,62 @@ or native commands into RenderGraph. A general material,
 shader, or pipeline API must intentionally replace/extend the closed recipe
 boundary with explicit layout, binding, capability, lifetime, and cross-backend
 semantics.
+
+## Fixed-asset residency (0.14)
+
+0.14 adds a private reuse layer only for fixed `MeshAsset`/`Geometry` and
+`ImageAsset`/linear `Rgba8Image` inputs. It is not an application-visible
+asset cache and does not change the existing fixed recipe, general shader,
+general/native RHI, or RenderGraph APIs. The sibling
+`fluxel-rendering-wasm` adapter adds only a closed experimental browser-
+residency seam with opaque tokens; they are not RHI or graph handles. The
+renderer records residency with the exact key:
+
+```text
+(AssetId, ContentGeneration, DeviceIdentity)
+```
+
+An `AssetId` names the logical source, `ContentGeneration` names one immutable
+content revision, and `DeviceIdentity` names the device for which the GPU
+representation was created. No shortened key is sufficient: an asset ID alone
+can select stale contents, and an asset/content pair alone can select a native
+resource for the wrong device.
+
+Preparation is the only asset-resolution boundary. It takes an immutable CPU
+`AssetSnapshot`, resolves or starts its fixed upload, and gives graph
+declaration a renderer-owned GPU snapshot plus its RHI lease. A raster pass
+has no `AssetStore`: it neither loads nor resolves assets, and therefore still
+declares only concrete imported resources and their states.
+
+```text
+AssetStore --AssetSnapshot--> renderer prepare
+    -> key lookup / fixed upload
+    -> renderer-owned GPU snapshot + RHI lease
+    -> graph declaration -> raster pass (no AssetStore)
+```
+
+Each private entry follows this small lifecycle:
+
+```text
+PendingUpload --upload completion--> Committed --replacement/device change/eviction--> RetireCandidate
+```
+
+Only `Committed` entries may satisfy preparation. `PendingUpload` cannot be
+drawn. A `RetireCandidate` retains its native resource while any accepted
+submission still has an RHI lease; submission completion, as observed by that
+lease, is the sole authority for final retirement. Replacing an asset, ending a
+frame, or observing device loss is not evidence that an old submission is
+complete.
+
+When a device is recreated, CPU `AssetSnapshot` values are retained and their
+fixed mesh/image contents are uploaded under the new `DeviceIdentity`. Old
+device entries are not transplanted or guessed safe; they remain retirement
+candidates until their original leases complete. This preserves cross-device
+safety without adding a recovery protocol to the general/native RHI or
+RenderGraph. Browser-specific recovery uses only the sibling adapter's closed
+experimental residency seam and opaque tokens.
+
+See [ADR-0010](adr/0010-renderer-private-fixed-asset-residency.md).
 
 The fixed visible-frame path sits at the renderer/RHI boundary above private
 swapchain details. Renderer accepts one acquired opaque binding for the entire

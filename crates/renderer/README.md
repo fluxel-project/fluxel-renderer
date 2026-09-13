@@ -27,7 +27,7 @@ pipeline/bind-group API, or own windows and swapchains.
 ```toml
 [dependencies.fluxel-renderer]
 git = "https://github.com/fluxel-project/fluxel-rendering"
-tag = "v0.12.0"
+tag = "v0.14.0"
 features = ["gpu-upload"]
 ```
 
@@ -37,6 +37,50 @@ non-blocking. A cloneable `IndexedMeshSnapshot` appears only after both native
 submissions complete; failure and partial acceptance never expose a half-ready
 generation. Buffers, resource states, mapping, and native handles remain
 renderer-private.
+
+## Fixed GPU residency
+
+With `gpu-residency`, the renderer can retain fixed `MeshAsset`/`Geometry` and
+`ImageAsset`/linear `Rgba8Image` contents from `fluxel-assets`. The dependency
+is pinned to the exact `fluxel-bases` `v0.13.4` revision, not to a moving
+branch:
+
+```toml
+[dependencies]
+fluxel-assets = { git = "https://github.com/fluxel-project/fluxel-bases.git", rev = "22c4eb0e199575aa71b59f3abc6ec3f72d934b9a", version = "=0.13.4" }
+fluxel-renderer = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.14.0", features = ["gpu-residency"] }
+```
+
+Residency is private renderer policy keyed exactly by
+`(AssetId, ContentGeneration, DeviceIdentity)`. It is neither an RHI or
+RenderGraph handle nor a public cache handle. A typical non-blocking loop is:
+
+```text
+prepare AssetSnapshot -> poll PendingUpload -> draw only Committed snapshot
+    -> retire superseded entry after lease completion -> recreate/reupload on new device
+```
+
+`prepare` resolves the immutable CPU snapshot and starts or finds its fixed
+upload before graph declaration. `poll` observes upload and submission progress
+without blocking; `draw` receives only a committed renderer-owned snapshot.
+No render pass receives an `AssetStore` or performs a lookup. `retire` removes
+an entry from future selection but retains its RHI leases through known terminal
+submission completion. On device recreation, retained CPU snapshots are
+uploaded again under the new `DeviceIdentity`; old native objects are never
+transplanted.
+
+Changed content has a new `ContentGeneration`, so a stale generation cannot be
+selected as the replacement merely because its `AssetId` matches. A failed or
+accepted-unknown upload/submission is sticky for that exact residency attempt:
+it is not silently retried or republished. Explicitly retire that failed entry,
+then prepare again to create a new attempt. This preserves the existing
+accepted-unknown quarantine rule while keeping retry ownership visible to the
+caller.
+
+The initial image registry establishes the same identity/lifetime rules, but
+the retained legacy-unlit browser path does not claim that it samples resident
+images. Residency adds neither general shader/material behavior nor configurable
+sampling.
 
 `FixedFrameRenderer::draw` accepts a ready snapshot, `Camera`, `BasicMaterial`,
 and a nonzero extent. It serializes `projection * view` and the linear

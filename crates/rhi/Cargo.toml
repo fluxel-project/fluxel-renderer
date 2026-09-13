@@ -9,7 +9,7 @@ repository = "https://github.com/fluxel-project/fluxel-rendering"
 readme = "README.md"
 
 [dependencies]
-fluxel-rendergraph = { path = "../rendergraph", version = "0.12.0" }
+fluxel-rendergraph = { path = "../rendergraph", version = "0.14.0" }
 raw-window-handle = "0.6.2"
 
 [features]

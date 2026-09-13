@@ -17,6 +17,8 @@ pub struct FixedFrameRenderer {
     pub(in crate::fixed_frame) device: Device,
     pub(in crate::fixed_frame) capabilities: DeviceCapabilities,
     pub(in crate::fixed_frame) executor: Arc<fluxel_rendergraph::FrameExecutor<RasterBackend>>,
+    #[cfg(feature = "gpu-residency")]
+    pub(crate) residency: crate::residency::NativeResidency,
 }
 
 /// The deliberately disjoint texture domains accepted by fixed-frame lowering.

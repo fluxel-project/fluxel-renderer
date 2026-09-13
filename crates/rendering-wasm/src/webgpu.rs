@@ -8,8 +8,9 @@ use fluxel_renderer::adapter::{
     PreparedBasicGraph, PreparedBasicScene, PresentableFormat, PresentationProfile,
 };
 use fluxel_rhi::adapter::webgpu::{
-    FixedUnlitDraw, FixedUnlitGraph, WebGpuCanvasFormat, WebGpuLossReason, WebGpuRenderOutcome,
-    WebGpuSession as RhiSession, WebGpuSessionError, WebGpuSessionState,
+    FixedResidentUnlitDraw, FixedUnlitGraph, WebGpuAssetKey, WebGpuCanvasFormat, WebGpuLossReason,
+    WebGpuRenderOutcome, WebGpuResidentMesh, WebGpuSession as RhiSession, WebGpuSessionError,
+    WebGpuSessionState,
 };
 use js_sys::{Array, Object, Promise, Reflect};
 use wasm_bindgen::prelude::*;
@@ -24,6 +25,8 @@ pub struct WebGpuSession {
     inner: RhiSession,
     scene: PreparedBasicScene,
     graph: Option<PreparedBasicGraph>,
+    resident_generation: Option<u64>,
+    resident_meshes: Vec<WebGpuResidentMesh>,
 }
 
 #[wasm_bindgen]
@@ -52,10 +55,19 @@ impl WebGpuSession {
                 return Err(error);
             }
         };
+        let resident_meshes = if inner.state() == WebGpuSessionState::Active {
+            prepare_resident_meshes(&mut inner, &scene)?
+        } else {
+            Vec::new()
+        };
+        let resident_generation =
+            (inner.state() == WebGpuSessionState::Active).then_some(inner.generation());
         Ok(Self {
             inner,
             scene,
             graph,
+            resident_generation,
+            resident_meshes,
         })
     }
 
@@ -92,13 +104,17 @@ impl WebGpuSession {
             ));
         }
         self.refresh_graph_for_format()?;
+        if self.resident_generation != Some(self.inner.generation()) {
+            self.resident_meshes = prepare_resident_meshes(&mut self.inner, &self.scene)?;
+            self.resident_generation = Some(self.inner.generation());
+        }
         let draws = self
             .scene
             .draws()
             .iter()
-            .map(|draw| FixedUnlitDraw {
-                positions: draw.positions(),
-                indices: draw.indices(),
+            .zip(&self.resident_meshes)
+            .map(|(draw, mesh)| FixedResidentUnlitDraw {
+                mesh,
                 pvm_and_color: draw.pvm_and_color(),
                 insertion_index: draw.insertion_index(),
             })
@@ -120,7 +136,7 @@ impl WebGpuSession {
         let generation = self.inner.generation();
         let (outcome, marker) = match self
             .inner
-            .render(&contract, &draws)
+            .render_resident(&contract, &draws)
             .map_err(|error| webgpu_error_at(error, generation))?
         {
             WebGpuRenderOutcome::Submitted(marker) => ("submitted", Some(marker)),
@@ -229,6 +245,26 @@ impl WebGpuSession {
         }
         result
     }
+}
+
+fn prepare_resident_meshes(
+    session: &mut RhiSession,
+    scene: &PreparedBasicScene,
+) -> Result<Vec<WebGpuResidentMesh>, JsValue> {
+    scene
+        .draws()
+        .iter()
+        .enumerate()
+        .map(|(index, draw)| {
+            session
+                .resident_mesh(
+                    WebGpuAssetKey::new(index as u64, 1),
+                    draw.positions(),
+                    draw.indices(),
+                )
+                .map_err(|error| webgpu_error_at(error, session.generation()))
+        })
+        .collect()
 }
 
 impl WebGpuSession {

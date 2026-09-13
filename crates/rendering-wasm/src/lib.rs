@@ -13,7 +13,8 @@ pub use webgpu::WebGpuSession;
 use fluxel_renderer::adapter::{PreparedBasicGraph, PreparedBasicScene};
 use fluxel_renderer::{BasicMaterial, Camera, DrawList, Geometry, Mesh, ModelTransform};
 use fluxel_rhi::adapter::webgl2::{
-    FixedUnlitDraw, FixedUnlitGraph, WebGl2Session as RhiSession, WebGl2SessionError,
+    FixedResidentUnlitDraw, FixedUnlitGraph, WebGl2AssetKey, WebGl2ResidentMesh,
+    WebGl2Session as RhiSession, WebGl2SessionError,
 };
 use js_sys::{Array, Object, Reflect};
 use wasm_bindgen::prelude::*;
@@ -25,6 +26,8 @@ pub struct WebGl2Session {
     inner: RhiSession,
     scene: PreparedBasicScene,
     graph: Option<PreparedBasicGraph>,
+    resident_generation: Option<u64>,
+    resident_meshes: Vec<WebGl2ResidentMesh>,
 }
 
 #[wasm_bindgen]
@@ -39,8 +42,20 @@ impl WebGl2Session {
         } else {
             Some(scene.compile_presentable_graph(extent).map_err(error)?)
         };
+        let mut inner = RhiSession::new(canvas.into()).map_err(error)?;
+        let resident_meshes =
+            if inner.state() == fluxel_rhi::adapter::webgl2::WebGl2SessionState::Active {
+                prepare_webgl2_resident_meshes(&mut inner, &scene)?
+            } else {
+                Vec::new()
+            };
+        let resident_generation = (inner.state()
+            == fluxel_rhi::adapter::webgl2::WebGl2SessionState::Active)
+            .then_some(inner.generation());
         Ok(Self {
-            inner: RhiSession::new(canvas.into()).map_err(error)?,
+            resident_generation,
+            resident_meshes,
+            inner,
             scene,
             graph,
         })
@@ -71,13 +86,17 @@ impl WebGl2Session {
                 "browser session is not active",
             ));
         }
+        if self.resident_generation != Some(self.inner.generation()) {
+            self.resident_meshes = prepare_webgl2_resident_meshes(&mut self.inner, &self.scene)?;
+            self.resident_generation = Some(self.inner.generation());
+        }
         let draws: Vec<_> = self
             .scene
             .draws()
             .iter()
-            .map(|draw| FixedUnlitDraw {
-                positions: draw.positions(),
-                indices: draw.indices(),
+            .zip(&self.resident_meshes)
+            .map(|(draw, mesh)| FixedResidentUnlitDraw {
+                mesh,
                 pvm_and_color: draw.pvm_and_color(),
                 insertion_index: draw.insertion_index(),
             })
@@ -91,7 +110,7 @@ impl WebGl2Session {
             )
         })?;
         let contract = FixedUnlitGraph::new(graph.compiled(), graph.draw_count(), graph.extent());
-        let frame_marker = match self.inner.render(&contract, &draws) {
+        let frame_marker = match self.inner.render_resident(&contract, &draws) {
             Ok(marker) => marker,
             Err(WebGl2SessionError::Busy) => {
                 return Ok(frame_report(
@@ -164,6 +183,26 @@ impl WebGl2Session {
         }
         result
     }
+}
+
+fn prepare_webgl2_resident_meshes(
+    session: &mut RhiSession,
+    scene: &PreparedBasicScene,
+) -> Result<Vec<WebGl2ResidentMesh>, JsValue> {
+    scene
+        .draws()
+        .iter()
+        .enumerate()
+        .map(|(index, draw)| {
+            session
+                .resident_mesh(
+                    WebGl2AssetKey::new(index as u64, 1),
+                    draw.positions(),
+                    draw.indices(),
+                )
+                .map_err(error)
+        })
+        .collect()
 }
 
 fn frame_report(

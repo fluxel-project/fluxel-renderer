@@ -879,6 +879,11 @@ def main() -> int:
     ]
     if args.headless:
         chrome_command.insert(-1, "--headless=new")
+        if args.backend == "webgpu":
+            # Headless Chrome keeps WebGPU behind its explicit test gate even
+            # when the selected Windows adapter is hardware-backed.
+            chrome_command.insert(-1, "--enable-unsafe-webgpu")
+            chrome_command.insert(-1, "--ignore-gpu-blocklist")
         if sys.platform.startswith("linux"):
             # Hosted Linux runners commonly execute Chrome in a container
             # without a usable setuid sandbox and with a small /dev/shm.
@@ -888,7 +893,6 @@ def main() -> int:
             if args.backend == "webgpu":
                 # Linux hosted runners use bundled software Vulkan only as an
                 # ABI/lifecycle smoke; this does not establish a support target.
-                chrome_command.insert(-1, "--enable-unsafe-webgpu")
                 chrome_command.insert(-1, "--enable-features=Vulkan")
                 chrome_command.insert(-1, "--use-angle=swiftshader")
                 chrome_command.insert(-1, "--use-vulkan=swiftshader")

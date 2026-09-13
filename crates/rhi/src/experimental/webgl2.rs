@@ -5,10 +5,11 @@
 //! objects, including the canvas context, remain owned here.
 
 use core::fmt;
-use std::collections::VecDeque;
-
-#[cfg(test)]
-use std::cell::Cell;
+use std::{
+    cell::Cell,
+    collections::{HashMap, VecDeque},
+    rc::Rc,
+};
 
 use js_sys::{Float32Array, Object, Reflect, Uint32Array};
 use wasm_bindgen::{JsCast, JsValue};
@@ -172,6 +173,17 @@ pub struct FixedUnlitDraw<'a> {
     pub insertion_index: usize,
 }
 
+/// One closed draw that binds an opaque resident WebGL2 mesh.
+#[derive(Clone, Copy)]
+pub struct FixedResidentUnlitDraw<'a> {
+    /// Previously acquired token for the active context generation.
+    pub mesh: &'a WebGl2ResidentMesh,
+    /// Column-major P*V*M followed by linear RGBA.
+    pub pvm_and_color: [f32; 20],
+    /// Renderer insertion order.
+    pub insertion_index: usize,
+}
+
 /// Structured browser session state reported to its binding owner.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WebGl2SessionState {
@@ -316,6 +328,90 @@ struct Objects {
 struct PendingFence {
     sync: WebGlSync,
     generation: u64,
+    resident_meshes: Vec<Rc<ResidentMeshPhysical>>,
+}
+
+/// Exact logical asset revision for the closed WebGL2 residency seam.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct WebGl2AssetKey {
+    logical: u64,
+    content: u64,
+}
+impl WebGl2AssetKey {
+    /// Creates an exact logical asset/content key.
+    pub const fn new(logical: u64, content: u64) -> Self {
+        Self { logical, content }
+    }
+}
+
+/// Opaque resident mesh identity; it never exposes a WebGL object.
+#[derive(Clone)]
+pub struct WebGl2ResidentMesh {
+    #[expect(
+        dead_code,
+        reason = "identity is retained for renderer-owned replacement diagnostics"
+    )]
+    key: WebGl2AssetKey,
+    generation: u64,
+    physical: Rc<ResidentMeshPhysical>,
+    index_count: i32,
+}
+/// Opaque resident image identity; it never exposes a WebGL object.
+#[derive(Clone)]
+pub struct WebGl2ResidentImage {
+    #[expect(
+        dead_code,
+        reason = "identity is retained for renderer-owned replacement diagnostics"
+    )]
+    key: WebGl2AssetKey,
+    generation: u64,
+    #[expect(
+        dead_code,
+        reason = "opaque texture is retained for future fixed textured recipes"
+    )]
+    physical: Rc<ResidentImagePhysical>,
+}
+
+impl WebGl2ResidentMesh {
+    /// Device generation for diagnostics only.
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+impl WebGl2ResidentImage {
+    /// Device generation for diagnostics only.
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
+struct ResidentMeshPhysical {
+    gl: Gl,
+    live_generation: Rc<Cell<u64>>,
+    generation: u64,
+    position: WebGlBuffer,
+    index: WebGlBuffer,
+}
+impl Drop for ResidentMeshPhysical {
+    fn drop(&mut self) {
+        if self.live_generation.get() == self.generation {
+            self.gl.delete_buffer(Some(&self.position));
+            self.gl.delete_buffer(Some(&self.index));
+        }
+    }
+}
+struct ResidentImagePhysical {
+    gl: Gl,
+    live_generation: Rc<Cell<u64>>,
+    generation: u64,
+    image: WebGlTexture,
+}
+impl Drop for ResidentImagePhysical {
+    fn drop(&mut self) {
+        if self.live_generation.get() == self.generation {
+            self.gl.delete_texture(Some(&self.image));
+        }
+    }
 }
 
 /// One explicit canvas-bound, owner-thread WebGL2 session.
@@ -324,9 +420,12 @@ pub struct WebGl2Session {
     gl: Gl,
     objects: Option<Objects>,
     resource_floor: Option<ResourceFloorObjects>,
+    resident_meshes: HashMap<WebGl2AssetKey, Rc<ResidentMeshPhysical>>,
+    resident_images: HashMap<WebGl2AssetKey, Rc<ResidentImagePhysical>>,
     fences: VecDeque<PendingFence>,
     state: WebGl2SessionState,
     generation: u64,
+    live_resident_generation: Rc<Cell<u64>>,
     frame_marker: u64,
     diagnostics: Vec<WebGl2Diagnostic>,
 }
@@ -370,9 +469,12 @@ impl WebGl2Session {
             gl,
             objects: None,
             resource_floor: None,
+            resident_meshes: HashMap::new(),
+            resident_images: HashMap::new(),
             fences: VecDeque::new(),
             state: WebGl2SessionState::Suspended,
             generation: 0,
+            live_resident_generation: Rc::new(Cell::new(0)),
             frame_marker: 0,
             diagnostics: Vec::new(),
         };
@@ -437,7 +539,7 @@ impl WebGl2Session {
         draws: &[FixedUnlitDraw<'_>],
     ) -> Result<u64, WebGl2SessionError> {
         self.require_active()?;
-        self.validate_graph(graph, draws)?;
+        self.validate_graph(graph, draws.len())?;
         self.validate_draws(draws)?;
         #[cfg(test)]
         note_browser_side_effect(BrowserSideEffect::Recording);
@@ -506,6 +608,93 @@ impl WebGl2Session {
         self.fences.push_back(PendingFence {
             sync: fence,
             generation: self.generation,
+            resident_meshes: Vec::new(),
+        });
+        self.frame_marker = self
+            .frame_marker
+            .checked_add(1)
+            .ok_or_else(|| self.fail("frame", "frame marker exhausted"))?;
+        Ok(self.frame_marker)
+    }
+
+    /// Records the fixed unlit pass from resident mesh buffers. Replacement
+    /// removes future lookup only; an already acquired same-generation token
+    /// remains drawable until context loss or disposal.
+    pub fn render_resident(
+        &mut self,
+        graph: &FixedUnlitGraph<'_>,
+        draws: &[FixedResidentUnlitDraw<'_>],
+    ) -> Result<u64, WebGl2SessionError> {
+        self.require_active()?;
+        self.validate_graph(graph, draws.len())?;
+        if draws.iter().enumerate().any(|(i, draw)| {
+            draw.insertion_index != i
+                || !self.resident_mesh_current(draw.mesh)
+                || draw.pvm_and_color.iter().any(|value| !value.is_finite())
+        }) {
+            return Err(self.reject(
+                "resident-draw-contract-rejected",
+                "render-resident",
+                "graph, token, or draw ABI rejected",
+            ));
+        }
+        #[cfg(test)]
+        note_browser_side_effect(BrowserSideEffect::Recording);
+        if self.gl.is_context_lost() {
+            self.context_lost();
+            return Err(WebGl2SessionError::Browser {
+                code: "context-lost",
+                operation: "render-resident",
+                generation: self.generation,
+                message: "WebGL context is lost".into(),
+            });
+        }
+        self.collect_or_backpressure()?;
+        let width = i32::try_from(self.canvas.width())
+            .map_err(|_| self.fail("viewport", "width exceeds i32"))?;
+        let height = i32::try_from(self.canvas.height())
+            .map_err(|_| self.fail("viewport", "height exceeds i32"))?;
+        let objects = self.objects.as_ref().expect("active sessions have objects");
+        self.gl.viewport(0, 0, width, height);
+        self.gl.clear_color(0.0, 0.0, 0.0, 1.0);
+        self.gl.clear(Gl::COLOR_BUFFER_BIT);
+        self.gl.use_program(Some(&objects.program));
+        self.gl.bind_vertex_array(Some(&objects.vertex_array));
+        for draw in draws {
+            self.gl
+                .bind_buffer(Gl::ARRAY_BUFFER, Some(&draw.mesh.physical.position));
+            self.gl
+                .bind_buffer(Gl::ELEMENT_ARRAY_BUFFER, Some(&draw.mesh.physical.index));
+            self.gl.uniform_matrix4fv_with_f32_array(
+                Some(&objects.uniform),
+                false,
+                &draw.pvm_and_color[..16],
+            );
+            self.gl
+                .uniform4fv_with_f32_array(Some(&objects.color), &draw.pvm_and_color[16..]);
+            self.gl
+                .vertex_attrib_pointer_with_i32(0, 3, Gl::FLOAT, false, 0, 0);
+            self.gl.enable_vertex_attrib_array(0);
+            self.gl.draw_elements_with_i32(
+                Gl::TRIANGLES,
+                draw.mesh.index_count,
+                Gl::UNSIGNED_INT,
+                0,
+            );
+        }
+        self.check_error("resident-draw")?;
+        let sync = self
+            .gl
+            .fence_sync(Gl::SYNC_GPU_COMMANDS_COMPLETE, 0)
+            .ok_or_else(|| self.fail("resident-fence", "browser returned no sync object"))?;
+        self.gl.flush();
+        self.fences.push_back(PendingFence {
+            sync,
+            generation: self.generation,
+            resident_meshes: draws
+                .iter()
+                .map(|draw| Rc::clone(&draw.mesh.physical))
+                .collect(),
         });
         self.frame_marker = self
             .frame_marker
@@ -549,12 +738,193 @@ impl WebGl2Session {
             .evidence)
     }
 
+    /// Uploads or reuses an exact indexed mesh revision for the current context
+    /// generation. The token is only an identity, never a WebGL handle.
+    pub fn resident_mesh(
+        &mut self,
+        key: WebGl2AssetKey,
+        positions: &[[f32; 3]],
+        indices: &[u32],
+    ) -> Result<WebGl2ResidentMesh, WebGl2SessionError> {
+        self.require_active()?;
+        if positions.is_empty()
+            || indices.is_empty()
+            || !indices.len().is_multiple_of(3)
+            || positions.iter().flatten().any(|value| !value.is_finite())
+            || indices
+                .iter()
+                .any(|index| (*index as usize) >= positions.len())
+        {
+            return Err(self.reject(
+                "resident-mesh-contract-rejected",
+                "resident-mesh",
+                "invalid mesh ABI",
+            ));
+        }
+        if !self.resident_meshes.contains_key(&key) {
+            let position = self
+                .gl
+                .create_buffer()
+                .ok_or_else(|| self.fail("resident-mesh", "createBuffer returned null"))?;
+            let index = match self.gl.create_buffer() {
+                Some(value) => value,
+                None => {
+                    self.gl.delete_buffer(Some(&position));
+                    return Err(self.fail("resident-mesh", "createBuffer returned null"));
+                }
+            };
+            self.gl.bind_buffer(Gl::ARRAY_BUFFER, Some(&position));
+            let values: Vec<f32> = positions.iter().flatten().copied().collect();
+            self.gl.buffer_data_with_array_buffer_view(
+                Gl::ARRAY_BUFFER,
+                &Float32Array::from(values.as_slice()),
+                Gl::STATIC_DRAW,
+            );
+            self.gl.bind_buffer(Gl::ELEMENT_ARRAY_BUFFER, Some(&index));
+            self.gl.buffer_data_with_array_buffer_view(
+                Gl::ELEMENT_ARRAY_BUFFER,
+                &Uint32Array::from(indices),
+                Gl::STATIC_DRAW,
+            );
+            self.check_error("resident-mesh-upload")?;
+            self.resident_meshes.insert(
+                key,
+                Rc::new(ResidentMeshPhysical {
+                    gl: self.gl.clone(),
+                    live_generation: Rc::clone(&self.live_resident_generation),
+                    generation: self.generation,
+                    position,
+                    index,
+                }),
+            );
+        }
+        let Some(physical) = self.resident_meshes.get(&key) else {
+            unreachable!("mesh was inserted")
+        };
+        Ok(WebGl2ResidentMesh {
+            key,
+            generation: self.generation,
+            physical: Rc::clone(physical),
+            index_count: indices.len() as i32,
+        })
+    }
+
+    /// Uploads or reuses a linear RGBA8 image revision for the current context.
+    pub fn resident_image(
+        &mut self,
+        key: WebGl2AssetKey,
+        extent: [u32; 2],
+        pixels: &[u8],
+    ) -> Result<WebGl2ResidentImage, WebGl2SessionError> {
+        self.require_active()?;
+        let bytes = extent[0]
+            .checked_mul(extent[1])
+            .and_then(|value| value.checked_mul(4));
+        if extent.contains(&0)
+            || bytes.and_then(|value| usize::try_from(value).ok()) != Some(pixels.len())
+        {
+            return Err(self.reject(
+                "resident-image-contract-rejected",
+                "resident-image",
+                "invalid RGBA8 image ABI",
+            ));
+        }
+        if !self.resident_images.contains_key(&key) {
+            let image = self
+                .gl
+                .create_texture()
+                .ok_or_else(|| self.fail("resident-image", "createTexture returned null"))?;
+            self.gl.bind_texture(Gl::TEXTURE_2D, Some(&image));
+            self.gl
+                .tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_MIN_FILTER, Gl::NEAREST as i32);
+            self.gl
+                .tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_MAG_FILTER, Gl::NEAREST as i32);
+            self.gl
+                .tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
+                    Gl::TEXTURE_2D,
+                    0,
+                    Gl::RGBA as i32,
+                    extent[0] as i32,
+                    extent[1] as i32,
+                    0,
+                    Gl::RGBA,
+                    Gl::UNSIGNED_BYTE,
+                    Some(pixels),
+                )
+                .map_err(|error| {
+                    self.fail(
+                        "resident-image-upload",
+                        error
+                            .as_string()
+                            .unwrap_or_else(|| "texImage2D failed".into()),
+                    )
+                })?;
+            self.check_error("resident-image-upload")?;
+            self.resident_images.insert(
+                key,
+                Rc::new(ResidentImagePhysical {
+                    gl: self.gl.clone(),
+                    live_generation: Rc::clone(&self.live_resident_generation),
+                    generation: self.generation,
+                    image,
+                }),
+            );
+        }
+        let Some(physical) = self.resident_images.get(&key) else {
+            unreachable!("image was inserted")
+        };
+        Ok(WebGl2ResidentImage {
+            key,
+            generation: self.generation,
+            physical: Rc::clone(physical),
+        })
+    }
+
+    /// Invalidates one exact revision. Physical deletion waits until pending
+    /// frame fences are drained, so replacement cannot free submitted work.
+    pub fn retire_resident_asset(&mut self, key: WebGl2AssetKey) {
+        self.resident_meshes.remove(&key);
+        self.resident_images.remove(&key);
+    }
+
+    /// Invalidates all revisions of a logical asset for replacement.
+    pub fn replace_resident_asset(&mut self, logical: u64) {
+        let mesh_keys: Vec<_> = self
+            .resident_meshes
+            .keys()
+            .copied()
+            .filter(|key| key.logical == logical)
+            .collect();
+        let image_keys: Vec<_> = self
+            .resident_images
+            .keys()
+            .copied()
+            .filter(|key| key.logical == logical)
+            .collect();
+        for key in mesh_keys.into_iter().chain(image_keys) {
+            self.retire_resident_asset(key);
+        }
+    }
+
+    /// Reports whether a mesh token remains current for the restored context.
+    pub fn resident_mesh_current(&self, value: &WebGl2ResidentMesh) -> bool {
+        self.state == WebGl2SessionState::Active && value.generation == self.generation
+    }
+
+    /// Reports whether an image token remains current for the restored context.
+    pub fn resident_image_current(&self, value: &WebGl2ResidentImage) -> bool {
+        self.state == WebGl2SessionState::Active && value.generation == self.generation
+    }
+
     /// Stops drawing because the adapter observed a context-loss event.
     pub fn context_lost(&mut self) {
         if !matches!(self.state, WebGl2SessionState::Disposed) {
+            self.live_resident_generation.set(0);
             self.fences.clear();
             self.objects = None;
             self.resource_floor = None;
+            self.resident_meshes.clear();
+            self.resident_images.clear();
             self.state = WebGl2SessionState::Lost;
         }
     }
@@ -594,6 +964,9 @@ impl WebGl2Session {
         if let Some(fixture) = self.resource_floor.take() {
             resource_floor::destroy(&self.gl, fixture);
         }
+        self.resident_meshes.clear();
+        self.resident_images.clear();
+        self.live_resident_generation.set(0);
         if let Some(error) = finish_error {
             return Err(error);
         }
@@ -625,6 +998,7 @@ impl WebGl2Session {
             .generation
             .checked_add(1)
             .ok_or_else(|| self.fail("generation", "generation exhausted"))?;
+        self.live_resident_generation.set(self.generation);
         self.objects = Some(objects);
         self.state = WebGl2SessionState::Active;
         Ok(())
@@ -642,6 +1016,7 @@ impl WebGl2Session {
         if result == Gl::ALREADY_SIGNALED || result == Gl::CONDITION_SATISFIED {
             let fence = self.fences.pop_front().expect("front exists");
             self.gl.delete_sync(Some(&fence.sync));
+            drop(fence.resident_meshes);
             Ok(())
         } else if result == Gl::TIMEOUT_EXPIRED {
             Err(WebGl2SessionError::Busy)
@@ -705,7 +1080,7 @@ impl WebGl2Session {
     fn validate_graph(
         &mut self,
         graph: &FixedUnlitGraph<'_>,
-        draws: &[FixedUnlitDraw<'_>],
+        draw_count: usize,
     ) -> Result<(), WebGl2SessionError> {
         let plan = graph.compiled.execution_plan();
         let valid_pass = plan.passes().len() == 1
@@ -759,7 +1134,7 @@ impl WebGl2Session {
             || !presents
             || !valid_resources
             || graph.draw_count == 0
-            || graph.draw_count != draws.len()
+            || graph.draw_count != draw_count
             || graph.extent != canvas_extent
         {
             return Err(self.reject(

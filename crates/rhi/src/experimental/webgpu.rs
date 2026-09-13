@@ -31,14 +31,14 @@ mod resources;
 #[cfg(test)]
 mod tests;
 
-use contract::validate;
+use contract::{validate, validate_resident};
 use js::{
     BrowserRequestProvider, ProductionBrowserRequests, call0, call1, call2, call3, get, js_message,
     request_browser, set, to_js,
 };
 use resources::{
-    FrameDrawResources, create_frame_resources, destroy_frame_resources, pipeline,
-    unregister_uncaptured_error, write_buffer,
+    FrameDrawResources, ResidentLease, ResidentRegistry, create_frame_resources,
+    destroy_frame_resources, pipeline, unregister_uncaptured_error, write_buffer,
 };
 
 use resource_floor::{
@@ -116,6 +116,18 @@ pub struct FixedUnlitDraw<'a> {
     pub insertion_index: usize,
 }
 
+/// One closed draw that binds a previously uploaded resident mesh. Its opaque
+/// token retains the browser buffers even after a replacement removes lookup.
+#[derive(Clone, Copy)]
+pub struct FixedResidentUnlitDraw<'a> {
+    /// Previously acquired mesh token for this exact device generation.
+    pub mesh: &'a WebGpuResidentMesh,
+    /// Column-major P*V*M followed by linear RGBA.
+    pub pvm_and_color: [f32; 20],
+    /// Renderer insertion order.
+    pub insertion_index: usize,
+}
+
 /// Opaque caller-owned identity for one retained fixed-resource set.
 ///
 /// The same key reuses its physical browser resources until device loss or
@@ -127,6 +139,67 @@ impl WebGpuResourceKey {
     /// Creates an application-stable retained resource identity.
     pub const fn new(value: u64) -> Self {
         Self(value)
+    }
+}
+
+/// Exact logical asset revision used by the closed browser residency seam.
+/// The renderer supplies stable logical and immutable-content generations;
+/// the session adds its current device generation internally.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct WebGpuAssetKey {
+    logical: u64,
+    content: u64,
+}
+impl WebGpuAssetKey {
+    /// Creates an exact logical asset/content key.
+    pub const fn new(logical: u64, content: u64) -> Self {
+        Self { logical, content }
+    }
+}
+
+/// Opaque resident indexed mesh token. It contains no browser object.
+#[derive(Clone)]
+pub struct WebGpuResidentMesh {
+    #[expect(
+        dead_code,
+        reason = "identity is retained for renderer-owned replacement diagnostics"
+    )]
+    key: WebGpuAssetKey,
+    generation: u64,
+    index_count: u32,
+    lease: ResidentLease,
+}
+
+/// Opaque resident RGBA8 image token. It contains no browser object.
+#[derive(Clone)]
+pub struct WebGpuResidentImage {
+    #[expect(
+        dead_code,
+        reason = "identity is retained for renderer-owned replacement diagnostics"
+    )]
+    key: WebGpuAssetKey,
+    generation: u64,
+    #[expect(
+        dead_code,
+        reason = "opaque lease keeps the image alive for future fixed textured recipes"
+    )]
+    lease: ResidentLease,
+}
+
+impl WebGpuResidentMesh {
+    /// Device generation for diagnostics; no native identity is exposed.
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+    /// Fixed index count retained by this token.
+    pub const fn index_count(&self) -> u32 {
+        self.index_count
+    }
+}
+impl WebGpuResidentImage {
+    /// Device generation for diagnostics; no native identity is exposed.
+    pub const fn generation(&self) -> u64 {
+        self.generation
     }
 }
 
@@ -243,6 +316,7 @@ struct Ticket {
     promise: Promise,
     resources: Vec<FrameDrawResources>,
     resource_leases: Vec<ResourceLease>,
+    resident_leases: Vec<ResidentLease>,
     browser_roots: Vec<JsValue>,
 }
 struct Objects {
@@ -292,6 +366,7 @@ pub struct WebGpuSession {
     adapter_info: Rc<RefCell<WebGpuAdapterInfo>>,
     requests: Rc<dyn BrowserRequestProvider>,
     resource_registry: Rc<RefCell<ResourceRegistry>>,
+    resident_registry: Rc<RefCell<ResidentRegistry>>,
 }
 
 impl WebGpuSession {
@@ -330,6 +405,7 @@ impl WebGpuSession {
             adapter_info: Rc::new(RefCell::new(info)),
             requests,
             resource_registry: Rc::new(RefCell::new(ResourceRegistry::default())),
+            resident_registry: Rc::new(RefCell::new(ResidentRegistry::default())),
         };
         let objects = match value
             .install(
@@ -481,6 +557,7 @@ impl WebGpuSession {
             Vec::new(),
             pending.leases,
             pending.roots,
+            Vec::new(),
         );
         Ok(WebGpuRenderOutcome::Submitted(marker))
     }
@@ -492,6 +569,101 @@ impl WebGpuSession {
     pub fn retire_fixed_resources(&mut self, key: WebGpuResourceKey) {
         self.collect();
         self.resource_registry.borrow_mut().retire_key(key);
+    }
+
+    /// Uploads or reuses one exact indexed-mesh revision for this device
+    /// generation. The returned token is opaque and invalidated by replacement,
+    /// retirement, or device recovery.
+    pub fn resident_mesh(
+        &mut self,
+        key: WebGpuAssetKey,
+        positions: &[[f32; 3]],
+        indices: &[u32],
+    ) -> Result<WebGpuResidentMesh, WebGpuSessionError> {
+        self.collect();
+        if self.state() != WebGpuSessionState::Active
+            || positions.is_empty()
+            || indices.is_empty()
+            || !indices.len().is_multiple_of(3)
+            || positions.iter().flatten().any(|value| !value.is_finite())
+            || indices
+                .iter()
+                .any(|index| (*index as usize) >= positions.len())
+        {
+            return Err(WebGpuSessionError::Contract(
+                "resident-mesh-contract-rejected",
+            ));
+        }
+        let objects = self.render_objects()?;
+        let lease = self
+            .resident_registry
+            .borrow_mut()
+            .mesh(&objects.device, &objects.queue, key, positions, indices)
+            .map_err(|error| self.fail("resident-mesh-upload", error))?;
+        Ok(WebGpuResidentMesh {
+            key,
+            generation: self.generation(),
+            index_count: indices.len() as u32,
+            lease,
+        })
+    }
+
+    /// Uploads or reuses one exact linear-RGBA8 image revision. The fixed
+    /// unlit browser recipe does not sample this token yet, but its ownership
+    /// and retirement rules are identical to mesh residency.
+    pub fn resident_image(
+        &mut self,
+        key: WebGpuAssetKey,
+        extent: [u32; 2],
+        pixels: &[u8],
+    ) -> Result<WebGpuResidentImage, WebGpuSessionError> {
+        self.collect();
+        let required = extent[0]
+            .checked_mul(extent[1])
+            .and_then(|v| v.checked_mul(4));
+        if self.state() != WebGpuSessionState::Active
+            || extent.contains(&0)
+            || required.and_then(|v| usize::try_from(v).ok()) != Some(pixels.len())
+        {
+            return Err(WebGpuSessionError::Contract(
+                "resident-image-contract-rejected",
+            ));
+        }
+        let objects = self.render_objects()?;
+        let lease = self
+            .resident_registry
+            .borrow_mut()
+            .image(&objects.device, &objects.queue, key, extent, pixels)
+            .map_err(|error| self.fail("resident-image-upload", error))?;
+        Ok(WebGpuResidentImage {
+            key,
+            generation: self.generation(),
+            lease,
+        })
+    }
+
+    /// Retires one exact content revision from future lookup. Existing tokens
+    /// become unusable, while submitted tickets keep physical resources alive.
+    pub fn retire_resident_asset(&mut self, key: WebGpuAssetKey) {
+        self.collect();
+        self.resident_registry.borrow_mut().retire(key);
+    }
+
+    /// Retires every content revision of one logical asset, used for atomic
+    /// replacement by a higher renderer-owned residency table.
+    pub fn replace_resident_asset(&mut self, logical: u64) {
+        self.collect();
+        self.resident_registry.borrow_mut().retire_logical(logical);
+    }
+
+    /// Reports whether this opaque mesh token remains current for this device.
+    pub fn resident_mesh_current(&self, value: &WebGpuResidentMesh) -> bool {
+        self.state() == WebGpuSessionState::Active && value.generation == self.generation()
+    }
+
+    /// Reports whether this opaque image token remains current for this device.
+    pub fn resident_image_current(&self, value: &WebGpuResidentImage) -> bool {
+        self.state() == WebGpuSessionState::Active && value.generation == self.generation()
     }
 
     /// Merges the latest desired extent; active nonzero extents reconfigure.
@@ -668,6 +840,136 @@ impl WebGpuSession {
         Ok(WebGpuRenderOutcome::Submitted(marker))
     }
 
+    /// Records the same closed unlit pass using registry-owned mesh buffers.
+    /// It allocates only per-frame uniforms; positions and indices are never
+    /// re-uploaded. Replaced tokens remain valid until their generation ends.
+    pub fn render_resident(
+        &mut self,
+        graph: &FixedUnlitGraph<'_>,
+        draws: &[FixedResidentUnlitDraw<'_>],
+    ) -> Result<WebGpuRenderOutcome, WebGpuSessionError> {
+        self.collect();
+        if self.state() != WebGpuSessionState::Active {
+            return Ok(match self.state() {
+                WebGpuSessionState::Suspended => WebGpuRenderOutcome::Suspended,
+                WebGpuSessionState::Lost | WebGpuSessionState::Recovering => {
+                    WebGpuRenderOutcome::Lost
+                }
+                state => return Err(WebGpuSessionError::State(state)),
+            });
+        }
+        if self.tickets.borrow().len() >= MAX_FRAMES_IN_FLIGHT {
+            return Ok(WebGpuRenderOutcome::Backpressure);
+        }
+        validate_resident(graph, draws, self.format.get(), self.desired_extent.get())?;
+        if draws
+            .iter()
+            .any(|draw| !self.resident_mesh_current(draw.mesh))
+        {
+            return Err(WebGpuSessionError::Contract(
+                "resident-draw-contract-rejected",
+            ));
+        }
+        let objects = self.render_objects()?;
+        let texture =
+            call0(&objects.context, "getCurrentTexture").map_err(|e| self.fail("acquire", e))?;
+        let view = call0(&texture, "createView").map_err(|e| self.fail("create-view", e))?;
+        let encoder =
+            call0(&objects.device, "createCommandEncoder").map_err(|e| self.fail("encoder", e))?;
+        let attachment = Object::new();
+        set(&attachment, "view", &view).map_err(|e| self.fail("attachment", e))?;
+        set(&attachment, "loadOp", &"clear".into()).map_err(|e| self.fail("attachment", e))?;
+        set(&attachment, "storeOp", &"store".into()).map_err(|e| self.fail("attachment", e))?;
+        let clear = Object::new();
+        set(&clear, "r", &0.into()).map_err(|e| self.fail("clear", e))?;
+        set(&clear, "g", &0.into()).map_err(|e| self.fail("clear", e))?;
+        set(&clear, "b", &0.into()).map_err(|e| self.fail("clear", e))?;
+        set(&clear, "a", &1.into()).map_err(|e| self.fail("clear", e))?;
+        set(&attachment, "clearValue", &clear).map_err(|e| self.fail("clear", e))?;
+        let colors = Array::new();
+        colors.push(&attachment);
+        let pass_desc = Object::new();
+        set(&pass_desc, "colorAttachments", &colors).map_err(|e| self.fail("pass", e))?;
+        let pass = call1(&encoder, "beginRenderPass", &pass_desc)
+            .map_err(|e| self.fail("begin-pass", e))?;
+        call1(&pass, "setPipeline", &objects.pipeline).map_err(|e| self.fail("set-pipeline", e))?;
+        let mut resources = Vec::with_capacity(draws.len());
+        let mut leases = Vec::with_capacity(draws.len());
+        for draw in draws {
+            let resource = create_frame_resources(&objects.device, &objects.layout, 1, 1)
+                .map_err(|e| self.fail("create-frame-uniform", e))?;
+            let (position, index) = draw
+                .mesh
+                .lease
+                .mesh()
+                .ok_or(WebGpuSessionError::Contract("resident-mesh-token-invalid"))?;
+            let recorded = (|| -> Result<(), WebGpuSessionError> {
+                write_buffer(
+                    &objects.queue,
+                    &resource.uniform,
+                    &Float32Array::from(draw.pvm_and_color.as_slice()).into(),
+                )
+                .map_err(|e| self.fail("write-uniform", e))?;
+                call2(&pass, "setBindGroup", &0.into(), &resource.bind_group)
+                    .map_err(|e| self.fail("set-bind-group", e))?;
+                call3(&pass, "setVertexBuffer", &0.into(), position, &0.into())
+                    .map_err(|e| self.fail("set-vertex", e))?;
+                call3(&pass, "setIndexBuffer", index, &"uint32".into(), &0.into())
+                    .map_err(|e| self.fail("set-index", e))?;
+                call3(
+                    &pass,
+                    "drawIndexed",
+                    &draw.mesh.index_count.into(),
+                    &1.into(),
+                    &0.into(),
+                )
+                .map(|_| ())
+                .map_err(|e| self.fail("draw", e))
+            })();
+            if let Err(error) = recorded {
+                destroy_frame_resources(resources);
+                destroy_frame_resources(vec![resource]);
+                return Err(error);
+            }
+            resources.push(resource);
+            leases.push(draw.mesh.lease.clone());
+        }
+        if let Err(error) = call0(&pass, "end") {
+            return Err(self.abort_frame(resources, "end-pass", error));
+        }
+        let commands = match call0(&encoder, "finish") {
+            Ok(value) => value,
+            Err(error) => return Err(self.abort_frame(resources, "finish", error)),
+        };
+        let command_list = Array::new();
+        command_list.push(&commands);
+        if let Err(error) = call1(&objects.queue, "submit", &command_list) {
+            return Err(self.abort_frame(resources, "submit", error));
+        }
+        let marker = {
+            let mut state = self.shared.borrow_mut();
+            state.next_marker += 1;
+            state.next_marker
+        };
+        let completion = match call0(&objects.queue, "onSubmittedWorkDone") {
+            Ok(value) => value,
+            Err(error) => {
+                self.quarantined.borrow_mut().extend(resources);
+                let _ = call0(&objects.device, "destroy");
+                return Err(self.fail("completion", error));
+            }
+        };
+        self.ticket_with_leases(
+            marker,
+            completion,
+            resources,
+            Vec::new(),
+            Vec::new(),
+            leases,
+        );
+        Ok(WebGpuRenderOutcome::Submitted(marker))
+    }
+
     /// Starts (or returns) the one cached recovery operation for this session.
     ///
     /// The returned Promise owns only cloned shared cells; it never holds a
@@ -694,6 +996,7 @@ impl WebGpuSession {
         // registry now, while detached tickets keep accepted work alive until
         // its completion Promise settles.
         self.resource_registry.borrow_mut().retire_generation();
+        self.resident_registry.borrow_mut().retire_generation();
         let quarantined = std::mem::take(&mut *self.quarantined.borrow_mut());
         destroy_frame_resources(quarantined);
         if let Some(objects) = self.objects.borrow_mut().take() {
@@ -869,6 +1172,7 @@ impl WebGpuSession {
         let recovery = self.recovery_promise.borrow().clone();
         let objects = self.objects.borrow_mut().take();
         self.resource_registry.borrow_mut().retire_generation();
+        self.resident_registry.borrow_mut().retire_generation();
         let session = self.shared_clone();
         let promise = future_to_promise(async move {
             if let Some(recovery) = recovery {
@@ -921,6 +1225,7 @@ impl WebGpuSession {
             adapter_info: Rc::clone(&self.adapter_info),
             requests: Rc::clone(&self.requests),
             resource_registry: Rc::clone(&self.resource_registry),
+            resident_registry: Rc::clone(&self.resident_registry),
         }
     }
 
@@ -1151,7 +1456,14 @@ impl WebGpuSession {
         Ok(())
     }
     fn ticket(&self, marker: u64, promise: JsValue, resources: Vec<FrameDrawResources>) {
-        self.ticket_with_leases(marker, promise, resources, Vec::new(), Vec::new());
+        self.ticket_with_leases(
+            marker,
+            promise,
+            resources,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
     }
     fn ticket_with_leases(
         &self,
@@ -1160,6 +1472,7 @@ impl WebGpuSession {
         resources: Vec<FrameDrawResources>,
         resource_leases: Vec<ResourceLease>,
         browser_roots: Vec<JsValue>,
+        resident_leases: Vec<ResidentLease>,
     ) {
         let settled = Rc::new(RefCell::new(None));
         let a = Rc::clone(&settled);
@@ -1183,6 +1496,7 @@ impl WebGpuSession {
             promise,
             resources,
             resource_leases,
+            resident_leases,
             browser_roots,
         });
     }
@@ -1251,6 +1565,7 @@ impl WebGpuSession {
             // No `Shared` borrow crosses the JS FFI destroys below.
             destroy_frame_resources(ticket.resources);
             drop(ticket.resource_leases);
+            drop(ticket.resident_leases);
         }
         loop {
             let Some(ticket) = ({
@@ -1268,6 +1583,7 @@ impl WebGpuSession {
             };
             destroy_frame_resources(ticket.resources);
             drop(ticket.resource_leases);
+            drop(ticket.resident_leases);
         }
     }
     /// Drops old device observer roots only after the browser has settled the
@@ -1297,6 +1613,7 @@ impl WebGpuSession {
             let _ = JsFuture::from(ticket.promise.clone()).await;
             destroy_frame_resources(ticket.resources);
             drop(ticket.resource_leases);
+            drop(ticket.resident_leases);
         }
     }
     fn require_nonterminal(&self) -> Result<(), WebGpuSessionError> {

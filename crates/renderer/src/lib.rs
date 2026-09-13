@@ -35,6 +35,8 @@ pub(crate) mod fixed_frame;
 pub(crate) mod frame_uniform;
 #[cfg(feature = "gpu-upload")]
 mod prepared_scene;
+#[cfg(feature = "gpu-residency")]
+mod residency;
 mod shader;
 #[cfg(feature = "gpu-upload")]
 mod upload;
@@ -62,6 +64,11 @@ pub use fixed_frame::{
 };
 #[cfg(all(windows, feature = "gpu-upload"))]
 pub use fixed_frame::{VisibleFrameStartError, VisibleFrameStatus, VisibleFrameSubmission};
+#[cfg(feature = "gpu-residency")]
+pub use residency::{
+    AssetResidencyError, AssetResidencyFailure, ImageAsset, MeshAsset, ResidencyRecreation,
+    ResidentAssetPair, ResidentAssetStatus,
+};
 #[cfg(feature = "gpu-upload")]
 pub use upload::{
     BaseColorTextureSnapshot, BaseColorTextureUpload, BaseColorTextureUploadFailure,

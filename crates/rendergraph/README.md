@@ -22,7 +22,7 @@ or pipeline API remain outside it.
 ```toml
 [dependencies.fluxel-rendergraph]
 git = "https://github.com/fluxel-project/fluxel-rendering"
-tag = "v0.12.0"
+tag = "v0.14.0"
 ```
 
 The crate is not published on crates.io yet, so the Git dependency is the
@@ -134,6 +134,12 @@ Before recording, frame resolution checks that this set covers the compiled
 requirement for both imports and backend-created transients. Providers derive
 allowed operations from creation and native facts; they must not copy the
 compiled requirement into the binding.
+
+Renderer-private GPU residency is resolved before this boundary. A frame binds
+only the selected concrete snapshot, its state, and lease; graph setup and pass
+callbacks receive neither `AssetStore` nor an asset lookup handle. Residency
+does not add an asset identity, cache, or generic shader contract to
+RenderGraph.
 
 Start with [`01_copy_buffer.rs`](examples/01_copy_buffer.rs) for an import and
 export, then [`14_two_frame_dynamic.rs`](examples/14_two_frame_dynamic.rs) for

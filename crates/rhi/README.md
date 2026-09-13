@@ -37,7 +37,7 @@ padded to the native 256-byte requirement.
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/fluxel-project/fluxel-rendering"
-tag = "v0.12.0"
+tag = "v0.14.0"
 ```
 
 The crate is not published on crates.io yet, so the Git dependency is the
@@ -47,7 +47,7 @@ To select one explicitly:
 ```toml
 [dependencies.fluxel-rhi]
 git = "https://github.com/fluxel-project/fluxel-rendering"
-tag = "v0.12.0"
+tag = "v0.14.0"
 default-features = false
 features = ["dx12"]
 ```
@@ -267,6 +267,14 @@ size, checked in both graph recording and RHI lowering. Queue operations are
 serialized per opened device, including error-path idle waits. Surface/present
 outside the one fixed DX12/Vulkan path, general shaders/pipelines, renderer lowering,
 multi-queue, parallel recording, aliasing, and performance work remain out of scope.
+
+Renderer-private fixed-asset residency reuses these existing opaque upload,
+lease, and completion contracts. It adds no general/native RHI asset handle,
+cache, lookup, or recreation API: renderer preparation supplies already-
+resolved imported resources, and RHI leases remain the authority for submission
+completion and safe retirement. The sibling `fluxel-rendering-wasm` adapter
+alone has a closed experimental browser-residency seam with opaque tokens; they
+are not native RHI or RenderGraph handles.
 
 ## Testing and development
 

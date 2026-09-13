@@ -331,6 +331,15 @@ impl IndexedMeshUpload {
     pub fn ready_snapshot(&self) -> Option<IndexedMeshSnapshot> {
         self.snapshot.clone()
     }
+
+    /// Reports whether a failed coordinator still owns accepted work whose
+    /// completion is pending, unknown, or temporarily unobservable.
+    #[cfg(feature = "gpu-residency")]
+    pub(crate) fn retirement_pending(&self) -> bool {
+        [&self.positions, &self.indices]
+            .into_iter()
+            .any(upload_slot_requires_retention)
+    }
 }
 
 /// Pure publication policy kept separate from the RHI completion adapter.
@@ -459,6 +468,17 @@ fn upload_slot_state(slot: &UploadSlot) -> RetainedUploadState {
         UploadSlot::Absent => RetainedUploadState::Missing,
         UploadSlot::Pending(_) => RetainedUploadState::Pending,
         UploadSlot::Ready(_) => RetainedUploadState::Ready,
+    }
+}
+
+#[cfg(feature = "gpu-residency")]
+fn upload_slot_requires_retention(slot: &UploadSlot) -> bool {
+    let UploadSlot::Pending(upload) = slot else {
+        return false;
+    };
+    match upload.status() {
+        Ok(CompletionStatus::Complete | CompletionStatus::Failed(_)) => false,
+        Ok(_) | Err(_) => true,
     }
 }
 

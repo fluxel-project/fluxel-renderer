@@ -3,7 +3,7 @@
 `fluxel-rendering` is Fluxel's host-agnostic Rust rendering kernel. Its typed
 render graph, native RHI boundary, and renderer layer provide portable drawing
 semantics and GPU execution without owning an application host. Cross-frame
-asset identity, platform services, runtime packaging, and language SDKs belong
+logical asset identity, platform services, runtime packaging, and language SDKs belong
 to adjacent Fluxel repositories described in the
 [Fluxel ecosystem roadmap](https://github.com/fluxel-project/.github/blob/main/ROADMAP.md).
 
@@ -47,12 +47,12 @@ The workspace releases its three publishable crates together. Git consumers must
 release tag rather than follow `main`:
 
 ```toml
-fluxel-rendergraph = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.12.0" }
-fluxel-rhi = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.12.0" }
-fluxel-renderer = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.12.0" }
+fluxel-rendergraph = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.14.0" }
+fluxel-rhi = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.14.0" }
+fluxel-renderer = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.14.0" }
 ```
 
-`v0.12.0` and each publishable package's `0.12.0` version identify the same workspace
+`v0.14.0` and each publishable package's `0.14.0` version identify the same workspace
 release. See [RELEASING.md](RELEASING.md) for the release gate.
 
 ## Documentation
@@ -147,11 +147,13 @@ or resource-builder API.
 
 ### Out of scope
 
-Durable asset identity and caching, general file or URL loading, broad scene
-graphs, animation, application host policy, and higher-level JS or UI APIs
-belong to other Fluxel layers. This workspace owns backend bring-up and the
-minimal presentation boundary needed to prove RHI and renderer behavior; it
-does not own a general platform runtime or host services.
+Durable logical asset identity and caching, general file or URL loading, broad
+scene graphs, animation, application host policy, and higher-level JS or UI
+APIs belong to other Fluxel layers, principally `fluxel-bases` for logical
+assets. This workspace owns backend bring-up, the minimal presentation boundary,
+and renderer-private per-device GPU residency needed to prove renderer behavior;
+it does not own a general platform runtime, host services, or a public asset
+cache API.
 
 ## License
 

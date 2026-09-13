@@ -318,6 +318,18 @@ impl BaseColorTextureUpload {
     pub fn ready_snapshot(&self) -> Option<BaseColorTextureSnapshot> {
         self.snapshot.clone()
     }
+
+    /// Reports whether a failed upload still owns accepted work whose
+    /// completion is pending, unknown, or temporarily unobservable.
+    #[cfg(feature = "gpu-residency")]
+    pub(crate) fn retirement_pending(&self) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|pending| match pending.status() {
+                Ok(CompletionStatus::Complete | CompletionStatus::Failed(_)) => false,
+                Ok(_) | Err(_) => true,
+            })
+    }
 }
 
 impl fmt::Debug for BaseColorTextureUpload {

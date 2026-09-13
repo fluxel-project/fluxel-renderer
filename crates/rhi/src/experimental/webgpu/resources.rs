@@ -3,17 +3,173 @@
 //! Resource ownership remains with the parent session's tickets; this module
 //! only constructs and destroys the JavaScript objects it is handed.
 
-use js_sys::{Array, Object, Reflect};
+use std::{collections::HashMap, rc::Rc};
+
+use js_sys::{Array, Object, Reflect, Uint8Array};
 use wasm_bindgen::JsValue;
 
-use super::js::{call0, call1, call2, call3, set_js, set_raw};
-use super::{Objects, WebGpuCanvasFormat};
+use super::js::{call0, call1, call2, call3, call4, set_js, set_raw};
+use super::{Objects, WebGpuAssetKey, WebGpuCanvasFormat};
 
 pub(super) struct FrameDrawResources {
     pub(super) position: JsValue,
     pub(super) index: JsValue,
     pub(super) uniform: JsValue,
     pub(super) bind_group: JsValue,
+}
+
+/// Completion-safe ownership of a closed resident asset. Browser objects never
+/// escape this module; a session ticket retains this lease until completion.
+#[derive(Clone)]
+pub(super) struct ResidentLease(Rc<ResidentPhysical>);
+
+struct ResidentPhysical {
+    position: Option<JsValue>,
+    index: Option<JsValue>,
+    image: Option<JsValue>,
+}
+
+impl Drop for ResidentPhysical {
+    fn drop(&mut self) {
+        for object in [&self.position, &self.index, &self.image]
+            .into_iter()
+            .flatten()
+        {
+            let _ = call0(object, "destroy");
+        }
+    }
+}
+
+/// Generation-local closed asset lookup. Retirement only removes lookup
+/// authority; accepted work keeps its `ResidentLease` alive.
+#[derive(Default)]
+pub(super) struct ResidentRegistry {
+    meshes: HashMap<WebGpuAssetKey, ResidentLease>,
+    images: HashMap<WebGpuAssetKey, ResidentLease>,
+}
+
+impl ResidentRegistry {
+    pub(super) fn mesh(
+        &mut self,
+        device: &JsValue,
+        queue: &JsValue,
+        key: WebGpuAssetKey,
+        positions: &[[f32; 3]],
+        indices: &[u32],
+    ) -> Result<ResidentLease, JsValue> {
+        if let Some(value) = self.meshes.get(&key) {
+            return Ok(value.clone());
+        }
+        let position = buffer(device, bytes_rounded(positions.len() * 3 * 4), 0x20 | 0x8)?;
+        let index = match buffer(device, bytes_rounded(indices.len() * 4), 0x10 | 0x8) {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = call0(&position, "destroy");
+                return Err(error);
+            }
+        };
+        let values: Vec<f32> = positions.iter().flatten().copied().collect();
+        write_buffer(
+            queue,
+            &position,
+            &js_sys::Float32Array::from(values.as_slice()).into(),
+        )?;
+        if let Err(error) = write_buffer(queue, &index, &js_sys::Uint32Array::from(indices).into())
+        {
+            let _ = call0(&position, "destroy");
+            let _ = call0(&index, "destroy");
+            return Err(error);
+        }
+        let value = ResidentLease(Rc::new(ResidentPhysical {
+            position: Some(position),
+            index: Some(index),
+            image: None,
+        }));
+        self.meshes.insert(key, value.clone());
+        Ok(value)
+    }
+
+    pub(super) fn image(
+        &mut self,
+        device: &JsValue,
+        queue: &JsValue,
+        key: WebGpuAssetKey,
+        extent: [u32; 2],
+        pixels: &[u8],
+    ) -> Result<ResidentLease, JsValue> {
+        if let Some(value) = self.images.get(&key) {
+            return Ok(value.clone());
+        }
+        let size = Object::new();
+        set_raw(&size, "width", extent[0])?;
+        set_raw(&size, "height", extent[1])?;
+        set_raw(&size, "depthOrArrayLayers", 1_u32)?;
+        let descriptor = Object::new();
+        set_js(&descriptor, "size", &size)?;
+        set_raw(&descriptor, "format", "rgba8unorm")?;
+        set_raw(&descriptor, "usage", 0x04_u32 | 0x02_u32)?;
+        let image = call1(device, "createTexture", &descriptor)?;
+        let destination = Object::new();
+        set_js(&destination, "texture", &image)?;
+        let row_bytes = usize::try_from(extent[0])
+            .unwrap_or(usize::MAX)
+            .saturating_mul(4);
+        let padded_row = row_bytes.next_multiple_of(256);
+        let mut padded = vec![0_u8; padded_row.saturating_mul(extent[1] as usize)];
+        for row in 0..extent[1] as usize {
+            let source = row * row_bytes;
+            let target = row * padded_row;
+            padded[target..target + row_bytes].copy_from_slice(&pixels[source..source + row_bytes]);
+        }
+        let layout = Object::new();
+        set_raw(
+            &layout,
+            "bytesPerRow",
+            u32::try_from(padded_row).unwrap_or(u32::MAX),
+        )?;
+        set_raw(&layout, "rowsPerImage", extent[1])?;
+        let copy_extent = Object::new();
+        set_raw(&copy_extent, "width", extent[0])?;
+        set_raw(&copy_extent, "height", extent[1])?;
+        set_raw(&copy_extent, "depthOrArrayLayers", 1_u32)?;
+        if let Err(error) = call4(
+            queue,
+            "writeTexture",
+            &destination,
+            &Uint8Array::from(padded.as_slice()).into(),
+            &layout,
+            &copy_extent,
+        ) {
+            let _ = call0(&image, "destroy");
+            return Err(error);
+        }
+        let value = ResidentLease(Rc::new(ResidentPhysical {
+            position: None,
+            index: None,
+            image: Some(image),
+        }));
+        self.images.insert(key, value.clone());
+        Ok(value)
+    }
+
+    pub(super) fn retire(&mut self, key: WebGpuAssetKey) {
+        self.meshes.remove(&key);
+        self.images.remove(&key);
+    }
+    pub(super) fn retire_logical(&mut self, logical: u64) {
+        self.meshes.retain(|key, _| key.logical != logical);
+        self.images.retain(|key, _| key.logical != logical);
+    }
+    pub(super) fn retire_generation(&mut self) {
+        self.meshes.clear();
+        self.images.clear();
+    }
+}
+
+impl ResidentLease {
+    pub(super) fn mesh(&self) -> Option<(&JsValue, &JsValue)> {
+        Some((self.0.position.as_ref()?, self.0.index.as_ref()?))
+    }
 }
 
 fn buffer(device: &JsValue, size: u32, usage: u32) -> Result<JsValue, JsValue> {

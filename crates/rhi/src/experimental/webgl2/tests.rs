@@ -14,6 +14,40 @@ use super::*;
 
 wasm_bindgen_test_configure!(run_in_browser);
 
+#[wasm_bindgen_test]
+fn resident_assets_reuse_replace_and_reupload_after_context_restoration() {
+    let mut session = WebGl2Session::new(canvas().into()).expect("WebGL2 session");
+    let positions = [[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 1.0, 0.0]];
+    let indices = [0, 1, 2];
+    let mesh = session
+        .resident_mesh(WebGl2AssetKey::new(51, 1), &positions, &indices)
+        .expect("mesh");
+    let image = session
+        // Same raw logical/content key must coexist across typed maps.
+        .resident_image(WebGl2AssetKey::new(51, 1), [1, 1], &[1, 2, 3, 4])
+        .expect("image");
+    assert!(session.resident_mesh_current(&mesh));
+    assert!(session.resident_image_current(&image));
+    session.replace_resident_asset(51);
+    // Lookup replacement does not invalidate an acquired same-context token.
+    assert!(session.resident_mesh_current(&mesh));
+    assert!(session.resident_image_current(&image));
+    let replacement = session
+        .resident_mesh(WebGl2AssetKey::new(51, 2), &positions, &indices)
+        .expect("replacement");
+    assert!(session.resident_mesh_current(&replacement));
+    let old_generation = session.generation();
+    session.context_lost();
+    assert!(!session.resident_mesh_current(&replacement));
+    session.context_restored().expect("restore");
+    assert_eq!(session.generation(), old_generation + 1);
+    let recreated = session
+        .resident_mesh(WebGl2AssetKey::new(51, 2), &positions, &indices)
+        .expect("reupload");
+    assert!(session.resident_mesh_current(&recreated));
+    session.dispose().expect("dispose");
+}
+
 fn canvas() -> web_sys::HtmlCanvasElement {
     let document = web_sys::window()
         .expect("browser window")

@@ -8,11 +8,54 @@ use fluxel_rendergraph::{
     TextureUsageKind,
 };
 
-use super::{FixedUnlitDraw, FixedUnlitGraph, WebGpuCanvasFormat, WebGpuSessionError};
+use super::{
+    FixedResidentUnlitDraw, FixedUnlitDraw, FixedUnlitGraph, WebGpuCanvasFormat, WebGpuSessionError,
+};
 
 pub(super) fn validate(
     graph: &FixedUnlitGraph<'_>,
     draws: &[FixedUnlitDraw<'_>],
+    format: WebGpuCanvasFormat,
+    extent: [u32; 2],
+) -> Result<(), WebGpuSessionError> {
+    validate_graph(graph, draws.len(), format, extent)?;
+    for (i, draw) in draws.iter().enumerate() {
+        if draw.insertion_index != i
+            || draw.indices.is_empty()
+            || !draw.indices.len().is_multiple_of(3)
+            || draw
+                .indices
+                .iter()
+                .any(|&x| x as usize >= draw.positions.len())
+            || draw.positions.iter().flatten().any(|x| !x.is_finite())
+            || draw.pvm_and_color.iter().any(|x| !x.is_finite())
+        {
+            return Err(WebGpuSessionError::Contract("fixed-draw-contract-rejected"));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn validate_resident(
+    graph: &FixedUnlitGraph<'_>,
+    draws: &[FixedResidentUnlitDraw<'_>],
+    format: WebGpuCanvasFormat,
+    extent: [u32; 2],
+) -> Result<(), WebGpuSessionError> {
+    validate_graph(graph, draws.len(), format, extent)?;
+    if draws.iter().enumerate().any(|(index, draw)| {
+        draw.insertion_index != index || draw.pvm_and_color.iter().any(|v| !v.is_finite())
+    }) {
+        return Err(WebGpuSessionError::Contract(
+            "resident-draw-contract-rejected",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_graph(
+    graph: &FixedUnlitGraph<'_>,
+    draw_count: usize,
     format: WebGpuCanvasFormat,
     extent: [u32; 2],
 ) -> Result<(), WebGpuSessionError> {
@@ -66,27 +109,13 @@ pub(super) fn validate(
         || ib != graph.draw_count
         || ub != graph.draw_count
         || presentable != 1
-        || graph.draw_count != draws.len()
+        || graph.draw_count != draw_count
         || graph.draw_count == 0
         || graph.extent != extent
     {
         return Err(WebGpuSessionError::Contract(
             "fixed-graph-contract-rejected",
         ));
-    }
-    for (i, draw) in draws.iter().enumerate() {
-        if draw.insertion_index != i
-            || draw.indices.is_empty()
-            || !draw.indices.len().is_multiple_of(3)
-            || draw
-                .indices
-                .iter()
-                .any(|&x| x as usize >= draw.positions.len())
-            || draw.positions.iter().flatten().any(|x| !x.is_finite())
-            || draw.pvm_and_color.iter().any(|x| !x.is_finite())
-        {
-            return Err(WebGpuSessionError::Contract("fixed-draw-contract-rejected"));
-        }
     }
     Ok(())
 }

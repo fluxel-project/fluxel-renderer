@@ -14,6 +14,8 @@ impl FixedFrameRenderer {
         Self {
             executor: Arc::new(fluxel_rendergraph::FrameExecutor::new(backend)),
             capabilities,
+            #[cfg(feature = "gpu-residency")]
+            residency: crate::residency::new_native_residency(&device),
             device,
         }
     }
@@ -33,6 +35,8 @@ impl FixedFrameRenderer {
         Self {
             executor: Arc::new(fluxel_rendergraph::FrameExecutor::new(backend)),
             capabilities,
+            #[cfg(feature = "gpu-residency")]
+            residency: crate::residency::new_native_residency(&device),
             device,
         }
     }

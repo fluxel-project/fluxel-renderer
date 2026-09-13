@@ -9,6 +9,49 @@ use crate::experimental::webgpu::js::BrowserRequestProvider;
 wasm_bindgen_test_configure!(run_in_browser);
 
 #[wasm_bindgen_test(async)]
+async fn resident_assets_reuse_replace_and_recreate_by_device_generation() {
+    let mut session = WebGpuSession::new(canvas()).await.expect("WebGPU session");
+    let mesh_key = WebGpuAssetKey::new(41, 1);
+    // Same raw logical/content key must coexist across the typed mesh/image maps.
+    let image_key = WebGpuAssetKey::new(41, 1);
+    let positions = [[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 1.0, 0.0]];
+    let indices = [0, 1, 2];
+    let mesh = session
+        .resident_mesh(mesh_key, &positions, &indices)
+        .expect("upload mesh");
+    let mesh_again = session
+        .resident_mesh(mesh_key, &positions, &indices)
+        .expect("reuse mesh");
+    let image = session
+        .resident_image(image_key, [1, 1], &[9, 8, 7, 6])
+        .expect("upload image");
+    assert!(session.resident_mesh_current(&mesh));
+    assert!(session.resident_mesh_current(&mesh_again));
+    assert!(session.resident_image_current(&image));
+    session.replace_resident_asset(41);
+    // Replacement only removes future lookup. This acquired lease is still
+    // admissible for an accepted same-generation submission.
+    assert!(session.resident_mesh_current(&mesh));
+    assert!(session.resident_image_current(&image));
+    let replacement = session
+        .resident_mesh(WebGpuAssetKey::new(41, 2), &positions, &indices)
+        .expect("replacement");
+    assert!(session.resident_mesh_current(&replacement));
+    session.controlled_destroy_for_evidence().expect("destroy");
+    lose(&mut session).await;
+    JsFuture::from(session.recover().expect("recover"))
+        .await
+        .expect("recovered");
+    assert_eq!(session.generation(), 2);
+    assert!(!session.resident_mesh_current(&replacement));
+    let recreated = session
+        .resident_mesh(WebGpuAssetKey::new(41, 2), &positions, &indices)
+        .expect("reupload");
+    assert!(session.resident_mesh_current(&recreated));
+    dispose(&mut session).await;
+}
+
+#[wasm_bindgen_test(async)]
 async fn fixed_resource_floor_and_compute_have_deterministic_map_read_oracles() {
     let mut session = WebGpuSession::new(canvas())
         .await

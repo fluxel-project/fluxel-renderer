@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/rendergraph", "crates/renderer", "crates/rhi", "crates/rendering-wasm"]
 
 [workspace.package]
-version = "0.12.0"
+version = "0.14.0"
 
 [profile.profiling]
 inherits = "release"

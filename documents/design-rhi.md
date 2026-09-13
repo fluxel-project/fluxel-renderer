@@ -301,10 +301,18 @@ and is the rule in [ADR-0004](adr/0004-accepted-unknown-quarantine.md).
 The Stage 2.1 browser executor is a separate closed `wasm32 + webgl2` adapter
 implementation. It owns the explicit canvas context, fixed shader/program,
 vertex array, reusable position/index buffers, and generation-tagged sync
-objects. Before issuing WebGL calls it validates the shared compiled plan as
+objects. In normal rendering, renderer preparation may reuse a committed
+resident mesh for that browser device generation; the adapter receives only
+concrete buffers and leases, never `AssetStore` or an asset lookup. Before
+issuing WebGL calls it validates the shared compiled plan as
 one black-clear/store raster pass with exactly one presentable target and the
 fixed per-draw vertex/index/uniform usage topology. It never exposes WebGL
 objects to RenderGraph or renderer code.
+
+The sibling `fluxel-rendering-wasm` adapter may expose a closed experimental
+browser-residency seam with opaque lifecycle tokens. This is not an extension
+of the general/native RHI or RenderGraph contract, and the tokens are not
+native RHI or graph handles.
 
 The WebGL2 capability factory is deliberately stricter than browser API
 availability. It compiles only the retained default-framebuffer raster/present
@@ -320,8 +328,10 @@ retires the oldest fence or reports normal backpressure; visibility, resize,
 RAF, and DOM events are never completion. Resizing replaces only the
 browser-owned default drawing buffer—no retained framebuffer identity is
 reused—while submitted fences remain live. Context loss invalidates the whole
-old browser generation; restore rebuilds objects for the same canvas. Normal
-dispose uses `finish` before deleting live sync and resource objects.
+old browser generation; restore rebuilds objects for the same canvas. Renderer
+residency retains CPU snapshots and reuploads fixed mesh contents for that new
+generation rather than reusing old browser objects. Normal dispose uses `finish`
+before deleting live sync and resource objects.
 
 The Stage 2.2 executor is a separate closed `wasm32 + webgpu` adapter
 implementation. It validates that same compiled graph and physical draw ABI,
@@ -341,6 +351,14 @@ Loss/recovery retires the old generation from lookup without destroying objects
 still retained by a ticket, while explicit per-key retirement creates a fresh
 physical object only for that key. This is not a public browser mapping,
 resource-builder, shader, or pipeline API.
+
+For renderer-private residency, a replacement creates a distinct content-
+generation entry. An old ticket/token remains safe with the resource it already
+leased, even when both entries belong to the same browser device generation;
+replacement never retargets that token. Device-generation loss prevents lookup
+of all old entries and requires fixed CPU snapshot reupload for a new entry.
+The browser image registry may track image identity and retirement, but the
+legacy-unlit path does not claim to sample resident images.
 
 A configured canvas epoch changes on nonzero reconfiguration but does not end
 the device generation or retire submitted work. Each accepted frame carries a

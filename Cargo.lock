@@ -326,9 +326,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3e0f1c7c3a72c66fd80abe965175f7523475c0489a87d3ff9d6e8c87d87a9d2d"
 
 [[package]]
+name = "fluxel-assets"
+version = "0.13.4"
+source = "git+https://github.com/fluxel-project/fluxel-bases.git?rev=22c4eb0e199575aa71b59f3abc6ec3f72d934b9a#22c4eb0e199575aa71b59f3abc6ec3f72d934b9a"
+
+[[package]]
 name = "fluxel-renderer"
-version = "0.12.0"
+version = "0.14.0"
 dependencies = [
+ "fluxel-assets",
  "fluxel-rendergraph",
  "fluxel-rhi",
  "slot-graph",
@@ -336,7 +342,7 @@ dependencies = [
 
 [[package]]
 name = "fluxel-rendergraph"
-version = "0.12.0"
+version = "0.14.0"
 dependencies = [
  "clap",
  "criterion",
@@ -344,7 +350,7 @@ dependencies = [
 
 [[package]]
 name = "fluxel-rendering-wasm"
-version = "0.12.0"
+version = "0.14.0"
 dependencies = [
  "fluxel-renderer",
  "fluxel-rhi",
@@ -356,7 +362,7 @@ dependencies = [
 
 [[package]]
 name = "fluxel-rhi"
-version = "0.12.0"
+version = "0.14.0"
 dependencies = [
  "ash",
  "fluxel-rendergraph",

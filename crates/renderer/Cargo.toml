@@ -15,16 +15,21 @@ default = []
 # Opt-in native upload coordination. The default crate remains the headless
 # domain model and does not link a graphics backend.
 gpu-upload = ["dep:fluxel-rendergraph", "dep:fluxel-rhi", "dep:slot-graph"]
+# Renderer-owned logical-asset to immutable GPU realization mapping. The
+# default headless domain model and the lower-level upload slice remain usable
+# without the cross-repository asset dependency.
+gpu-residency = ["gpu-upload", "dep:fluxel-assets"]
 
 [dependencies]
-fluxel-rendergraph = { path = "../rendergraph", version = "0.12.0", optional = true }
-fluxel-rhi = { path = "../rhi", version = "0.12.0", optional = true }
+fluxel-assets = { git = "https://github.com/fluxel-project/fluxel-bases.git", rev = "22c4eb0e199575aa71b59f3abc6ec3f72d934b9a", version = "=0.13.4", optional = true }
+fluxel-rendergraph = { path = "../rendergraph", version = "0.14.0", optional = true }
+fluxel-rhi = { path = "../rhi", version = "0.14.0", optional = true }
 # Renderer-private CPU preparation dependencies. This graph does not model GPU
 # hazards, submission, or retirement; those remain owned by RenderGraph/RHI.
 slot-graph = { version = "0.5.2", optional = true }
 
 [dev-dependencies]
-fluxel-rhi = { path = "../rhi", version = "0.12.0", default-features = false, features = ["dx12", "vulkan", "test-support"] }
+fluxel-rhi = { path = "../rhi", version = "0.14.0", default-features = false, features = ["dx12", "vulkan", "test-support"] }
 
 [[example]]
 name = "01_headless_frame"
