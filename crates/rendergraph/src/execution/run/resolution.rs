@@ -18,6 +18,7 @@ use super::super::{
     FrameExecution,
     recording::{PhysicalResource, PhysicalResources},
 };
+use super::transients::{TransientPool, TransientReservations};
 
 pub(super) fn live_resources<F>(graph: &CompiledGraph<F>) -> HashSet<ResourceId> {
     let mut live = HashSet::new();
@@ -42,6 +43,7 @@ pub(super) struct ResolvedFrameResources<B: ExecutionBackend> {
     pub(super) resource_leases: HashMap<ResourceId, B::Lease>,
     pub(super) retained: Vec<B::Lease>,
     pub(super) presentations: Vec<PresentationSubmission<B::PresentationToken>>,
+    pub(super) transient_reservations: TransientReservations<B>,
 }
 
 struct TextureBindingContract {
@@ -58,6 +60,7 @@ pub(super) fn resolve_resources<B, R, F, M>(
     execution: &FrameExecution<F, M>,
     provider: &R,
     backend: &mut B,
+    transient_pool: &mut TransientPool<B>,
     live: &HashSet<ResourceId>,
 ) -> Result<ResolvedFrameResources<B>, ExecutionError<B::Error>>
 where
@@ -74,10 +77,21 @@ where
         &buffer_bindings,
         &surface_bindings,
     )?;
+    let exported: HashSet<_> = graph
+        .roots
+        .iter()
+        .filter_map(|root| match root {
+            RootDecl::Texture(_, resource, _, _) | RootDecl::Buffer(_, resource, _, _) => {
+                Some(*resource)
+            }
+            RootDecl::Present(..) | RootDecl::SideEffect(..) => None,
+        })
+        .collect();
     let mut physical = HashMap::new();
     let mut resource_leases = HashMap::new();
     let mut retained = Vec::new();
     let mut surface_tokens = HashMap::new();
+    let mut transient_reservations = TransientReservations::default();
     // Texture and buffer identities live in independent backend namespaces.
     let mut texture_identities = HashMap::new();
     let mut buffer_identities = HashMap::new();
@@ -92,15 +106,28 @@ where
                     Some(ResourceUsageSummary::Texture(usage)) => usage,
                     _ => unreachable!("live transient texture has a texture usage requirement"),
                 };
-                let bound = backend
-                    .create_transient_texture(descriptor, usage)
-                    .map_err(ExecutionError::Backend)?;
+                let cache_final = cacheable_final_state(graph, resource.id);
+                let final_state = cache_final.unwrap_or(ResourceAccessState::Undefined);
+                let bound = if exported.contains(&resource.id) || cache_final.is_none() {
+                    backend.create_transient_texture(descriptor, usage)
+                } else {
+                    transient_pool.checkout_texture(
+                        backend,
+                        graph.identity,
+                        resource.id,
+                        descriptor,
+                        usage,
+                        final_state,
+                        &mut transient_reservations,
+                    )
+                }
+                .map_err(ExecutionError::Backend)?;
                 validate_bound_texture(
                     backend,
                     TextureBindingContract {
                         resource: resource.id,
                         descriptor,
-                        state: ResourceAccessState::Undefined,
+                        state: bound.initial_state,
                         usage,
                         texture_slot: None,
                         surface_binding: None,
@@ -115,6 +142,7 @@ where
                     PhysicalResource::Texture {
                         physical: bound.physical,
                         descriptor,
+                        initial_state: bound.initial_state,
                     },
                 );
             }
@@ -123,14 +151,27 @@ where
                     Some(ResourceUsageSummary::Buffer(usage)) => usage,
                     _ => unreachable!("live transient buffer has a buffer usage requirement"),
                 };
-                let bound = backend
-                    .create_transient_buffer(descriptor, usage)
-                    .map_err(ExecutionError::Backend)?;
+                let cache_final = cacheable_final_state(graph, resource.id);
+                let final_state = cache_final.unwrap_or(ResourceAccessState::Undefined);
+                let bound = if exported.contains(&resource.id) || cache_final.is_none() {
+                    backend.create_transient_buffer(descriptor, usage)
+                } else {
+                    transient_pool.checkout_buffer(
+                        backend,
+                        graph.identity,
+                        resource.id,
+                        descriptor,
+                        usage,
+                        final_state,
+                        &mut transient_reservations,
+                    )
+                }
+                .map_err(ExecutionError::Backend)?;
                 validate_bound_buffer(
                     backend,
                     resource.id,
                     descriptor,
-                    ResourceAccessState::Undefined,
+                    bound.initial_state,
                     usage,
                     None,
                     &bound,
@@ -143,6 +184,7 @@ where
                     PhysicalResource::Buffer {
                         physical: bound.physical,
                         descriptor,
+                        initial_state: bound.initial_state,
                     },
                 );
             }
@@ -188,6 +230,7 @@ where
                     PhysicalResource::Texture {
                         physical: bound.physical,
                         descriptor,
+                        initial_state: bound.initial_state,
                     },
                 );
             }
@@ -222,6 +265,7 @@ where
                     PhysicalResource::Buffer {
                         physical: bound.physical,
                         descriptor,
+                        initial_state: bound.initial_state,
                     },
                 );
             }
@@ -270,6 +314,7 @@ where
                     PhysicalResource::Texture {
                         physical: bound.texture.physical,
                         descriptor,
+                        initial_state: bound.texture.initial_state,
                     },
                 );
             }
@@ -295,7 +340,49 @@ where
         resource_leases,
         retained,
         presentations,
+        transient_reservations,
     })
+}
+
+/// Finds the one state a cached allocation will have after this plan, but only
+/// for whole-resource transitions. Partial state tracking would require a
+/// subresource state vector, so those plans deliberately allocate afresh.
+fn cacheable_final_state<F>(
+    graph: &CompiledGraph<F>,
+    resource: ResourceId,
+) -> Option<ResourceAccessState> {
+    use crate::plan::PlannedResourceRange;
+
+    let mut final_state = None;
+    for transition in graph
+        .execution_plan()
+        .passes()
+        .iter()
+        .flat_map(|pass| pass.transitions.iter())
+        .chain(graph.execution_plan().final_transitions())
+    {
+        if transition.resource != resource {
+            continue;
+        }
+        let whole = match transition.range {
+            PlannedResourceRange::Texture(crate::TextureRange::Whole) => true,
+            PlannedResourceRange::Buffer(crate::BufferRange::Whole) => true,
+            PlannedResourceRange::Buffer(crate::BufferRange::Bytes { offset: 0, size }) => {
+                matches!(
+                    graph.resources.iter().find(|candidate| candidate.id == resource).map(|candidate| candidate.kind),
+                    Some(ResourceKind::Buffer(descriptor)) if size == descriptor.size
+                )
+            }
+            _ => false,
+        };
+        if !whole {
+            return None;
+        }
+        // The immutable compiler has already proven transition continuity;
+        // this helper only decides whether its ranges are cacheable.
+        final_state = Some(transition.after);
+    }
+    final_state
 }
 
 /// Checks frame-owned import identities before resolution can allocate or lease

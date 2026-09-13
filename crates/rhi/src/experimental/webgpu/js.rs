@@ -177,6 +177,31 @@ pub(super) fn call3(
     method(value, name)?.call3(value, a, b, c)
 }
 
+/// Calls a four-argument browser method while retaining its receiver.
+pub(super) fn call4(
+    value: &JsValue,
+    name: &str,
+    a: &JsValue,
+    b: &JsValue,
+    c: &JsValue,
+    d: &JsValue,
+) -> Result<JsValue, JsValue> {
+    method(value, name)?.call4(value, a, b, c, d)
+}
+
+/// Calls a five-argument browser method while retaining its receiver.
+pub(super) fn call5(
+    value: &JsValue,
+    name: &str,
+    a: &JsValue,
+    b: &JsValue,
+    c: &JsValue,
+    d: &JsValue,
+    e: &JsValue,
+) -> Result<JsValue, JsValue> {
+    method(value, name)?.call5(value, a, b, c, d, e)
+}
+
 pub(super) fn browser(
     operation: &'static str,
     generation: u64,

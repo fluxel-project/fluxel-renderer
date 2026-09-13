@@ -27,7 +27,7 @@ pipeline/bind-group API, or own windows and swapchains.
 ```toml
 [dependencies.fluxel-renderer]
 git = "https://github.com/fluxel-project/fluxel-rendering"
-tag = "v0.11.1"
+tag = "v0.12.0"
 features = ["gpu-upload"]
 ```
 

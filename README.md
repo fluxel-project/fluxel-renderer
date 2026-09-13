@@ -47,12 +47,12 @@ The workspace releases its three publishable crates together. Git consumers must
 release tag rather than follow `main`:
 
 ```toml
-fluxel-rendergraph = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.11.1" }
-fluxel-rhi = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.11.1" }
-fluxel-renderer = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.11.1" }
+fluxel-rendergraph = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.12.0" }
+fluxel-rhi = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.12.0" }
+fluxel-renderer = { git = "https://github.com/fluxel-project/fluxel-rendering", tag = "v0.12.0" }
 ```
 
-`v0.11.1` and each publishable package's `0.11.1` version identify the same workspace
+`v0.12.0` and each publishable package's `0.12.0` version identify the same workspace
 release. See [RELEASING.md](RELEASING.md) for the release gate.
 
 ## Documentation
@@ -101,17 +101,38 @@ supported paths and recommended entry points.
 
 Current retained closures are:
 
+- a fixed resource floor on DX12, Vulkan, WebGPU, and WebGL2;
+- fixed compute plus storage-buffer paths on DX12, Vulkan, and WebGPU;
+- fixed storage-texture writes on DX12, Vulkan, and WebGPU, and fixed
+  storage-texture reads on Vulkan only;
+- structured, zero-side-effect WebGL2 rejection for Compute and every storage
+  resource operation;
 - headless DX12/Vulkan execution and real-GPU conformance;
 - visible Windows DX12/Vulkan surface lifecycle and bounded completion;
 - the retained RGB scene on the named Chrome/WebGL2 target; and
 - the same scene on the named Chrome/WebGPU target, including canvas epochs,
   bounded completion, controlled destroyed-device recovery, and async disposal.
 
-The corresponding exact commits, supported-target limits, evidence hashes, and
-next authorized work are maintained in the ecosystem roadmap and GitHub
-Releases. The next authorized rendering work is 0.12 Minimum GPU Resource
-Closure: separate the common resource floor from modern capabilities and prove
-completion-safe physical reuse without widening the closed 0.11 adapter seam.
+This is a capability matrix, not a portable feature tier: DX12 storage-texture
+read fails closed on the observed driver, and WebGPU storage-texture read is
+not currently promised. WebGL2 does not emulate Compute or storage. Unsupported
+graph declarations expose a typed `UnsupportedCapability` requirement with the
+observed capability snapshot, so a host can choose a fallback before context or
+resource work begins.
+
+For application integration, begin with the typed RenderGraph declaration and
+compile it against the selected backend's observed capabilities; bind persistent
+objects through provider-owned imports and consume each export's reported
+outgoing state. The executor may privately reuse compatible whole-resource
+transients, but callers must never depend on a transient's physical identity.
+Details and lifetime limits are in [the RenderGraph design](documents/design-rendergraph.md),
+[the RHI design](documents/design-rhi.md), and
+[ADR-0009](documents/adr/0009-resource-floor-and-reuse-safety.md).
+
+The corresponding supported-target limits and release evidence are maintained
+in the ecosystem roadmap and GitHub Releases. The resource floor remains a
+closed set of recipes; it does not add a general shader, pipeline, descriptor,
+or resource-builder API.
 
 ### Unscheduled optimizations
 

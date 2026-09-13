@@ -173,6 +173,7 @@ fn texture_physical<'a, B: ExecutionBackend>(
         PhysicalResource::Texture {
             physical,
             descriptor,
+            ..
         } => (physical, *descriptor),
         PhysicalResource::Buffer { .. } => unreachable!(),
     }

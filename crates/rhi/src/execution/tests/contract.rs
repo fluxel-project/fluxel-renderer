@@ -46,6 +46,29 @@ fn compute_profile_adds_compute_without_mutating_copy_profile() {
 }
 
 #[test]
+fn native_profiles_support_completion_gated_cross_frame_transient_pooling() {
+    for capabilities in [
+        CopyBackend::portable_capabilities(),
+        ComputeBackend::portable_capabilities(),
+        RasterBackend::portable_capabilities(),
+    ] {
+        let transients = capabilities.transient_resources;
+        assert!(
+            transients.cross_frame_object_pooling,
+            "native DeviceOnly allocations keep their lease through completion"
+        );
+        assert!(
+            !transients.in_frame_object_reuse,
+            "fixed native profiles do not record alias/reuse barriers"
+        );
+        assert!(
+            !transients.aliased_memory,
+            "fixed native profiles do not expose heap aliasing"
+        );
+    }
+}
+
+#[test]
 fn raster_profile_is_single_queue_raster_compute_copy_rgba8() {
     let capabilities = RasterBackend::portable_capabilities();
     assert_eq!(capabilities.queues.len(), 1);
@@ -232,9 +255,11 @@ fn fixed_compute_artifacts_have_stable_entries_workgroups_and_source_hash() {
     for (kernel, entry) in [
         (ComputeKernel::WrappingAdd, "wrapping_add"),
         (ComputeKernel::WrappingMultiply, "wrapping_multiply"),
+        (ComputeKernel::TextureStoreRgba8, "store_rgba8"),
+        (ComputeKernel::TextureLoadRgba8, "load_rgba8"),
     ] {
         assert_eq!(kernel.entry_point(), entry);
-        assert_eq!(kernel.workgroup_size(), [64, 1, 1]);
+        assert!(matches!(kernel.workgroup_size(), [64, 1, 1] | [8, 8, 1]));
         assert_ne!(kernel.source_hash(), 0);
         assert_eq!(
             kernel.source_hash(),

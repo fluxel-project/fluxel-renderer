@@ -119,6 +119,16 @@ pub(crate) fn set_compute_bindings(
             // the safe execution layer.
             encoder.set_bind_group(pipeline_layout, 0, group, &[]);
         },
+        #[cfg(feature = "dx12")]
+        (
+            NativeEncoder::Dx12(encoder),
+            Some(NativeComputePipelineInner::Dx12 {
+                pipeline_layout, ..
+            }),
+            Some(NativeComputeBindingsInner::Dx12Texture { group, .. }),
+        ) => unsafe {
+            encoder.set_bind_group(pipeline_layout, 0, group, &[]);
+        },
         #[cfg(feature = "vulkan")]
         (
             NativeEncoder::Vulkan(encoder),
@@ -128,6 +138,16 @@ pub(crate) fn set_compute_bindings(
             Some(NativeComputeBindingsInner::Vulkan(group)),
         ) => unsafe {
             // SAFETY: same fixed-layout and active-pass invariant as DX12.
+            encoder.set_bind_group(pipeline_layout, 0, group, &[]);
+        },
+        #[cfg(feature = "vulkan")]
+        (
+            NativeEncoder::Vulkan(encoder),
+            Some(NativeComputePipelineInner::Vulkan {
+                pipeline_layout, ..
+            }),
+            Some(NativeComputeBindingsInner::VulkanTexture { group, .. }),
+        ) => unsafe {
             encoder.set_bind_group(pipeline_layout, 0, group, &[]);
         },
         _ => return Err("compute bindings belong to another native backend".into()),

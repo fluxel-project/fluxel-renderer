@@ -87,6 +87,11 @@ fn texture_pack_is_a_distinct_closed_compute_recipe() {
 }
 
 #[test]
+fn storage_texture_recipes_are_distinct_and_closed() {
+    recipes::storage_texture_recipes_are_distinct_and_closed();
+}
+
+#[test]
 fn raster_identities_are_portable_but_recipes_remain_distinct() {
     recipes::raster_identities_are_portable_but_recipes_remain_distinct();
 }

@@ -25,6 +25,8 @@ mod contract;
 mod error;
 mod format;
 mod js;
+mod resource_conformance;
+mod resource_floor;
 mod resources;
 #[cfg(test)]
 mod tests;
@@ -38,6 +40,13 @@ use resources::{
     FrameDrawResources, create_frame_resources, destroy_frame_resources, pipeline,
     unregister_uncaptured_error, write_buffer,
 };
+
+use resource_floor::{
+    ResourceLease, ResourceRegistry, commit as commit_resource_floor,
+    submit as submit_resource_floor,
+};
+#[cfg(test)]
+use resource_floor::{observe_pending, prepare as prepare_resource_floor};
 
 use fluxel_rendergraph::CompiledGraph;
 
@@ -105,6 +114,38 @@ pub struct FixedUnlitDraw<'a> {
     pub pvm_and_color: [f32; 20],
     /// Renderer insertion order.
     pub insertion_index: usize,
+}
+
+/// Opaque caller-owned identity for one retained fixed-resource set.
+///
+/// The same key reuses its physical browser resources until device loss or
+/// disposal; it never exposes a browser object.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct WebGpuResourceKey(pub(crate) u64);
+
+impl WebGpuResourceKey {
+    /// Creates an application-stable retained resource identity.
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+/// CPU inputs for the closed Raster→Compute→Copy browser resource recipe.
+///
+/// This is not a command list: resource descriptors, usage flags, shader
+/// modules, bind layouts, attachment formats and copy regions are fixed by
+/// the RHI implementation.
+pub struct FixedResourceFrame<'a> {
+    /// Stable key selecting the retained physical resource set.
+    pub resources: WebGpuResourceKey,
+    /// Exactly three clip-space `f32x2` triangle positions.
+    pub positions: &'a [[f32; 2]],
+    /// Exactly `[0, 1, 2]` triangle-list indices.
+    pub indices: &'a [u32],
+    /// Fixed fragment multiplier for the sampled texel.
+    pub tint: [f32; 4],
+    /// Whole immutable one-pixel RGBA8 sampled-image contents.
+    pub sampled_rgba8: [u8; 4],
 }
 
 /// Structured executor diagnostic. Normal backpressure and loss are states,
@@ -201,6 +242,8 @@ struct Ticket {
     err: Closure<dyn FnMut(JsValue)>,
     promise: Promise,
     resources: Vec<FrameDrawResources>,
+    resource_leases: Vec<ResourceLease>,
+    browser_roots: Vec<JsValue>,
 }
 struct Objects {
     device: JsValue,
@@ -248,6 +291,7 @@ pub struct WebGpuSession {
     dispose_promise: Rc<RefCell<Option<Promise>>>,
     adapter_info: Rc<RefCell<WebGpuAdapterInfo>>,
     requests: Rc<dyn BrowserRequestProvider>,
+    resource_registry: Rc<RefCell<ResourceRegistry>>,
 }
 
 impl WebGpuSession {
@@ -285,6 +329,7 @@ impl WebGpuSession {
             dispose_promise: Rc::new(RefCell::new(None)),
             adapter_info: Rc::new(RefCell::new(info)),
             requests,
+            resource_registry: Rc::new(RefCell::new(ResourceRegistry::default())),
         };
         let objects = match value
             .install(
@@ -334,6 +379,119 @@ impl WebGpuSession {
     /// Returns a non-draining diagnostic snapshot.
     pub fn diagnostics(&self) -> Vec<WebGpuDiagnostic> {
         self.shared.borrow().diagnostics.clone()
+    }
+
+    /// Executes the private, fixed WebGPU resource-floor witness.
+    ///
+    /// This is deliberately test-only: it proves the browser implementation's
+    /// closed resource recipes without turning the session into a public
+    /// command, shader, or pipeline API.
+    #[cfg(test)]
+    pub(super) async fn resource_conformance(&mut self) -> Result<(), WebGpuSessionError> {
+        self.collect();
+        if self.state() != WebGpuSessionState::Active {
+            return Err(WebGpuSessionError::State(self.state()));
+        }
+        let objects = self.render_objects()?;
+        let frame = FixedResourceFrame {
+            resources: WebGpuResourceKey::new(u64::MAX),
+            positions: &[[-1.0, -1.0], [3.0, -1.0], [-1.0, 3.0]],
+            indices: &[0, 1, 2],
+            tint: [1.0; 4],
+            sampled_rgba8: [12, 34, 56, 255],
+        };
+        call1(&objects.device, "pushErrorScope", &"validation".into())
+            .map_err(|error| self.fail("resource-conformance-scope", error))?;
+        let prepared = prepare_resource_floor(
+            &objects.device,
+            &objects.queue,
+            &mut self.resource_registry.borrow_mut(),
+            self.generation(),
+            frame,
+        );
+        // Pop the scope on both prepare and observation failure. Otherwise a
+        // rejected fixture could leak a device-global diagnostic scope into a
+        // later, unrelated browser operation.
+        let observed = match prepared {
+            Ok(pending) => observe_pending(&objects.queue, pending)
+                .await
+                .map_err(|error| ("resource-conformance", error)),
+            Err(error) => Err(("resource-conformance-prepare", error)),
+        };
+        let scope = JsFuture::from(Promise::from(
+            call0(&objects.device, "popErrorScope")
+                .map_err(|error| self.fail("resource-conformance-scope", error))?,
+        ))
+        .await
+        .map_err(|error| self.fail("resource-conformance-scope", error))?;
+        if !scope.is_null() && !scope.is_undefined() {
+            return Err(self.fail(
+                "resource-conformance-validation",
+                JsValue::from_str(&format!("WebGPU validation error: {scope:?}")),
+            ));
+        }
+        observed.map_err(|(operation, error)| self.fail(operation, error))
+    }
+
+    /// Records the closed retained resource recipe on the active WebGPU device.
+    ///
+    /// This normal wasm production path retains physical resources by key and
+    /// generation. It intentionally accepts no shader text, pipeline, browser
+    /// handle, arbitrary binding layout, or arbitrary copy command.
+    pub fn render_fixed_resources(
+        &mut self,
+        frame: FixedResourceFrame<'_>,
+    ) -> Result<WebGpuRenderOutcome, WebGpuSessionError> {
+        self.collect();
+        match self.state() {
+            WebGpuSessionState::Active => {}
+            WebGpuSessionState::Suspended => return Ok(WebGpuRenderOutcome::Suspended),
+            WebGpuSessionState::Lost | WebGpuSessionState::Recovering => {
+                return Ok(WebGpuRenderOutcome::Lost);
+            }
+            state => return Err(WebGpuSessionError::State(state)),
+        }
+        if self.tickets.borrow().len() >= MAX_FRAMES_IN_FLIGHT {
+            return Ok(WebGpuRenderOutcome::Backpressure);
+        }
+        let objects = self.render_objects()?;
+        let (command, pending) = submit_resource_floor(
+            &objects.device,
+            &objects.queue,
+            &mut self.resource_registry.borrow_mut(),
+            self.generation(),
+            frame,
+        )
+        .map_err(|error| self.fail("fixed-resource-record", error))?;
+        let commands = Array::new();
+        commands.push(&command);
+        call1(&objects.queue, "submit", &commands)
+            .map_err(|error| self.fail("fixed-resource-submit", error))?;
+        commit_resource_floor(&pending);
+        let completion = call0(&objects.queue, "onSubmittedWorkDone")
+            .map_err(|error| self.fail("fixed-resource-completion", error))?;
+        let marker = {
+            let mut shared = self.shared.borrow_mut();
+            shared.next_marker += 1;
+            shared.next_marker
+        };
+        self.ticket_with_leases(
+            marker,
+            completion,
+            Vec::new(),
+            pending.leases,
+            pending.roots,
+        );
+        Ok(WebGpuRenderOutcome::Submitted(marker))
+    }
+
+    /// Retires one closed fixed-resource identity.
+    ///
+    /// Commands already accepted by the browser retain their ticket-owned
+    /// leases; a subsequent submission for this key receives fresh resources.
+    pub fn retire_fixed_resources(&mut self, key: WebGpuResourceKey) {
+        self.collect();
+        self.resource_registry.borrow_mut().retire_key(key);
     }
 
     /// Merges the latest desired extent; active nonzero extents reconfigure.
@@ -532,6 +690,10 @@ impl WebGpuSession {
         self.detached
             .borrow_mut()
             .append(&mut self.tickets.borrow_mut());
+        // Old-generation native resources are removed from the importable
+        // registry now, while detached tickets keep accepted work alive until
+        // its completion Promise settles.
+        self.resource_registry.borrow_mut().retire_generation();
         let quarantined = std::mem::take(&mut *self.quarantined.borrow_mut());
         destroy_frame_resources(quarantined);
         if let Some(objects) = self.objects.borrow_mut().take() {
@@ -706,6 +868,7 @@ impl WebGpuSession {
         // cleanup must join that exact operation before it publishes Disposed.
         let recovery = self.recovery_promise.borrow().clone();
         let objects = self.objects.borrow_mut().take();
+        self.resource_registry.borrow_mut().retire_generation();
         let session = self.shared_clone();
         let promise = future_to_promise(async move {
             if let Some(recovery) = recovery {
@@ -757,6 +920,7 @@ impl WebGpuSession {
             dispose_promise: Rc::clone(&self.dispose_promise),
             adapter_info: Rc::clone(&self.adapter_info),
             requests: Rc::clone(&self.requests),
+            resource_registry: Rc::clone(&self.resource_registry),
         }
     }
 
@@ -987,6 +1151,16 @@ impl WebGpuSession {
         Ok(())
     }
     fn ticket(&self, marker: u64, promise: JsValue, resources: Vec<FrameDrawResources>) {
+        self.ticket_with_leases(marker, promise, resources, Vec::new(), Vec::new());
+    }
+    fn ticket_with_leases(
+        &self,
+        marker: u64,
+        promise: JsValue,
+        resources: Vec<FrameDrawResources>,
+        resource_leases: Vec<ResourceLease>,
+        browser_roots: Vec<JsValue>,
+    ) {
         let settled = Rc::new(RefCell::new(None));
         let a = Rc::clone(&settled);
         let ok =
@@ -1008,6 +1182,8 @@ impl WebGpuSession {
             err,
             promise,
             resources,
+            resource_leases,
+            browser_roots,
         });
     }
     /// Snapshots just the frame encoding handles. No `RefCell` guard escapes
@@ -1044,7 +1220,12 @@ impl WebGpuSession {
             };
             // These closures are deliberately retained until settlement; this
             // read also documents that their drop is the ticket retirement.
-            let _continuations = (&ticket.ok, &ticket.err, ticket.marker);
+            let _continuations = (
+                &ticket.ok,
+                &ticket.err,
+                ticket.marker,
+                &ticket.browser_roots,
+            );
             {
                 let mut state = self.shared.borrow_mut();
                 if ticket.generation == state.generation
@@ -1069,6 +1250,7 @@ impl WebGpuSession {
             }
             // No `Shared` borrow crosses the JS FFI destroys below.
             destroy_frame_resources(ticket.resources);
+            drop(ticket.resource_leases);
         }
         loop {
             let Some(ticket) = ({
@@ -1085,6 +1267,7 @@ impl WebGpuSession {
                 break;
             };
             destroy_frame_resources(ticket.resources);
+            drop(ticket.resource_leases);
         }
     }
     /// Drops old device observer roots only after the browser has settled the
@@ -1113,6 +1296,7 @@ impl WebGpuSession {
         } {
             let _ = JsFuture::from(ticket.promise.clone()).await;
             destroy_frame_resources(ticket.resources);
+            drop(ticket.resource_leases);
         }
     }
     fn require_nonterminal(&self) -> Result<(), WebGpuSessionError> {

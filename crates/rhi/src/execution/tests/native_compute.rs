@@ -1,6 +1,6 @@
 //! Native compute witnesses.
 
-use super::native_common::{NoObjects, Resources, TextureCopyData};
+use super::native_common::{NoObjects, Resources, TextureCopyData, add_copy};
 use super::native_raster::r01_oracle;
 use super::native_raster::{ComputeCase, RasterBufferCase, add_compute};
 use crate::*;
@@ -16,8 +16,659 @@ struct X01CopyData {
     destination: BufferWrite,
 }
 
+/// Native proof for executor-private cross-frame transient reuse. The middle
+/// buffer remains graph-local; imports make its results observable without
+/// turning it into an uncacheable exported resource.
+pub(super) fn run_t01_transient_reuse(backend: crate::Backend) {
+    const SIZE: u64 = 64;
+    let mut graph = RenderGraph::new();
+    let source = graph.import_buffer_slot(
+        "t01-source",
+        ImportBufferContract {
+            descriptor: BufferDesc { size: SIZE },
+            initial_state: ResourceAccessState::CopyDestination,
+            ownership: ExternalOwnership::Caller,
+            initial_contents: InitialContents::Defined,
+        },
+    );
+    let destination = graph.import_buffer_slot(
+        "t01-destination",
+        ImportBufferContract {
+            descriptor: BufferDesc { size: SIZE },
+            initial_state: ResourceAccessState::CopyDestination,
+            ownership: ExternalOwnership::Caller,
+            initial_contents: InitialContents::Defined,
+        },
+    );
+    let transient = graph.create_buffer("t01-graph-transient", BufferDesc { size: SIZE });
+    let transient = add_copy(
+        &mut graph,
+        "t01-copy-in",
+        &source.version,
+        transient,
+        0,
+        0,
+        SIZE,
+    );
+    let output = add_copy(
+        &mut graph,
+        "t01-copy-out",
+        &transient,
+        destination.version,
+        0,
+        0,
+        SIZE,
+    );
+    // Keep the external source's declared incoming state true on every frame.
+    // The observation is unused, but its final-state root records the required
+    // CopySource -> CopyDestination restoration after the copy pass.
+    let _source_export = graph.export_buffer(
+        source.version,
+        ExportBufferContract {
+            final_state: ResourceAccessState::CopyDestination,
+        },
+    );
+    let export = graph.export_buffer(
+        output,
+        ExportBufferContract {
+            final_state: ResourceAccessState::CopyDestination,
+        },
+    );
+    let device = Device::open(
+        backend,
+        DeviceOptions {
+            validation: Validation::Required,
+            ..DeviceOptions::default()
+        },
+    )
+    .unwrap();
+    let backend_instance = ComputeBackend::new(device.clone());
+    let compiled = graph
+        .compile(backend_instance.capabilities())
+        .expect("T01 graph compiles against the selected native compute device")
+        .graph;
+    crate::imp::clear_validation_diagnostics(&device.inner);
+    let usage = BufferUsage::from_kinds([
+        BufferUsageKind::CopySource,
+        BufferUsageKind::CopyDestination,
+    ]);
+    let source_bytes: Vec<u8> = (0..SIZE as u8).map(|byte| byte ^ 0xA5).collect();
+    let mut resources = Resources {
+        device: device.identity(),
+        buffers: HashMap::new(),
+        textures: HashMap::new(),
+    };
+    for (id, bytes) in [
+        (BufferBindingId::new(1), source_bytes.clone()),
+        (BufferBindingId::new(2), vec![0xCD; SIZE as usize]),
+    ] {
+        let buffer = device
+            .create_buffer(BufferDescriptor {
+                buffer: BufferDesc { size: SIZE },
+                usage,
+                memory: MemoryPolicy::DeviceOnly,
+            })
+            .unwrap();
+        let state = crate::imp::upload_buffer_for_test(
+            &device.inner,
+            buffer.native(),
+            buffer.lease().into(),
+            &bytes,
+        )
+        .unwrap();
+        resources.buffers.insert(id, (buffer, state));
+    }
+    let executor = FrameExecutor::new(backend_instance);
+    let execute = |resources: &Resources| {
+        let mut inputs = FrameInputs::new(());
+        inputs.bind_buffer(source.slot, BufferBindingId::new(1));
+        inputs.bind_buffer(destination.slot, BufferBindingId::new(2));
+        executor
+            .execute(
+                &compiled,
+                compiled.instantiate_local(inputs),
+                resources,
+                &NoObjects,
+            )
+            .unwrap()
+    };
+    let mut first = execute(&resources);
+    let first_completion = first.submission.completion().clone();
+    executor
+        .try_backend()
+        .unwrap()
+        .wait(&first_completion, std::time::Duration::from_secs(10))
+        .unwrap();
+    assert_eq!(
+        first.submission.status().unwrap(),
+        CompletionStatus::Complete
+    );
+    drop(first);
+    let mut second = execute(&resources);
+    let second_completion = second.submission.completion().clone();
+    executor
+        .try_backend()
+        .unwrap()
+        .wait(&second_completion, std::time::Duration::from_secs(10))
+        .unwrap();
+    assert_eq!(
+        second.submission.status().unwrap(),
+        CompletionStatus::Complete
+    );
+    let output = second.exports.buffer(export).unwrap();
+    let actual = crate::imp::readback_buffer_for_test(
+        &device.inner,
+        output.physical.native(),
+        output.lease.clone(),
+        output.outgoing_state,
+        SIZE,
+    )
+    .unwrap();
+    assert_eq!(
+        actual, source_bytes,
+        "T01/{backend:?} two-frame byte oracle"
+    );
+    drop(second);
+    let observations = executor
+        .try_backend()
+        .unwrap()
+        .test_transient_observations();
+    assert_eq!(observations.allocations.len(), 1);
+    let identity = observations.allocations[0];
+    let transitions: Vec<_> = observations
+        .transitions
+        .iter()
+        .copied()
+        .filter(|transition| transition.identity == identity)
+        .collect();
+    assert_eq!(transitions.len(), 4, "T01/{backend:?} two barriers/frame");
+    assert_eq!(transitions[2].before, transitions[1].after);
+    assert_eq!(transitions[1].after, ResourceAccessState::CopySource);
+    executor.invalidate_graph(&compiled).unwrap();
+    let mut third = execute(&resources);
+    let third_completion = third.submission.completion().clone();
+    executor
+        .try_backend()
+        .unwrap()
+        .wait(&third_completion, std::time::Duration::from_secs(10))
+        .unwrap();
+    assert_eq!(
+        third.submission.status().unwrap(),
+        CompletionStatus::Complete
+    );
+    drop(third);
+    let after_invalidate = executor
+        .try_backend()
+        .unwrap()
+        .test_transient_observations();
+    assert_eq!(after_invalidate.allocations.len(), 2);
+    assert_ne!(
+        after_invalidate.allocations[0],
+        after_invalidate.allocations[1]
+    );
+    let diagnostics = crate::imp::validation_diagnostics(&device.inner);
+    assert!(diagnostics.is_empty(), "T01/{backend:?}: {diagnostics:#?}");
+    eprintln!(
+        "artifact case=T01 backend={backend:?} hardware={:?}; transient_allocations={:?}; frame2_first_before={:?}; terminal={:?}; exact_readback={actual:?}; invalidate_new_identity=true; diagnostics=empty",
+        device.hardware(),
+        after_invalidate.allocations,
+        transitions[2].before,
+        transitions[1].after,
+    );
+}
+
 pub(super) fn run_x01(backend: crate::Backend) {
     run_x01_case(backend, &build_x01(), "independent");
+}
+
+/// Hardware witness for the two closed RGBA8 storage-texture recipes.
+/// The staging observers are deliberately outside the graph and consume the
+/// graph-recorded terminal state; they cannot repair a missing transition.
+pub(super) fn run_s01(backend: crate::Backend) {
+    let device = Device::open(
+        backend,
+        crate::DeviceOptions {
+            validation: crate::Validation::Required,
+            ..crate::DeviceOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        device.capabilities().rgba8_unorm_storage_write,
+        "S01/{backend:?} selected support matrix requires RGBA8 storage write; hardware={:?}",
+        device.hardware()
+    );
+    match backend {
+        crate::Backend::Dx12 => {
+            assert!(
+                !device.capabilities().rgba8_unorm_storage_read_enabled,
+                "S01/DX12 contract must not advertise the unproved typed storage-read path"
+            );
+            return run_s01_store_only(backend, device);
+        }
+        crate::Backend::Vulkan => assert!(
+            device.capabilities().rgba8_unorm_storage_read_enabled,
+            "S01/Vulkan selected support matrix requires RGBA8 storage read; hardware={:?}",
+            device.hardware()
+        ),
+    }
+    crate::imp::clear_validation_diagnostics(&device.inner);
+    let descriptor = TextureDesc {
+        dimension: TextureDimension::D2,
+        extent: Extent3d {
+            width: 4,
+            height: 3,
+            depth: 1,
+        },
+        mip_levels: 1,
+        array_layers: 1,
+        sample_count: 1,
+        format: TextureFormat::Rgba8Unorm,
+    };
+    let mut graph = RenderGraph::new();
+    let texture_slot = graph.import_texture_slot(
+        "s01-rgba8",
+        ImportTextureContract {
+            descriptor,
+            initial_state: ResourceAccessState::Undefined,
+            ownership: ExternalOwnership::Caller,
+            initial_contents: InitialContents::Undefined,
+        },
+    );
+    let buffer_slot = graph.import_buffer_slot(
+        "s01-packed",
+        ImportBufferContract {
+            descriptor: BufferDesc { size: 256 },
+            initial_state: ResourceAccessState::CopyDestination,
+            ownership: ExternalOwnership::Caller,
+            initial_contents: InitialContents::Defined,
+        },
+    );
+    let store_pipeline = ComputePipelineId::new(801);
+    let store_bindings = BindingSetId::new(802);
+    let store = graph.add_compute_pass(
+        "s01-store",
+        |pass| {
+            let (out, texture) = pass.write_texture(
+                texture_slot.version,
+                TextureWriteUse::Storage,
+                TextureRange::Whole,
+                WriteCoverage::Full,
+            );
+            (out, (texture, store_pipeline, store_bindings))
+        },
+        |commands, resolver, data, _| {
+            commands.set_pipeline(data.1)?;
+            let bound = resolver.resolve_bindings(
+                data.2,
+                &[BindingResource::TextureWrite(&data.0)],
+                &[],
+            )?;
+            commands.set_bindings(&bound)?;
+            commands.dispatch([1, 1, 1])
+        },
+    );
+    let load_pipeline = ComputePipelineId::new(803);
+    let load_bindings = BindingSetId::new(804);
+    let load = graph.add_compute_pass(
+        "s01-load",
+        |pass| {
+            let source =
+                pass.read_texture(&store.output, TextureReadUse::Storage, TextureRange::Whole);
+            let (out, destination) = pass.read_write_buffer(
+                buffer_slot.version,
+                BufferReadWriteUse::Storage,
+                BufferRange::Whole,
+            );
+            (out, (source, destination, load_pipeline, load_bindings))
+        },
+        |commands, resolver, data, _| {
+            commands.set_pipeline(data.2)?;
+            let bound = resolver.resolve_bindings(
+                data.3,
+                &[
+                    BindingResource::TextureRead(&data.0),
+                    BindingResource::BufferReadWrite(&data.1),
+                ],
+                &[],
+            )?;
+            commands.set_bindings(&bound)?;
+            commands.dispatch([1, 1, 1])
+        },
+    );
+    let texture_export = graph.export_texture(
+        store.output,
+        ExportTextureContract {
+            final_state: ResourceAccessState::CopySource,
+        },
+    );
+    let buffer_export = graph.export_buffer(
+        load.output,
+        ExportBufferContract {
+            final_state: ResourceAccessState::CopySource,
+        },
+    );
+    let backend_instance = ComputeBackend::new(device.clone());
+    let compiled = graph
+        .compile(backend_instance.capabilities())
+        .unwrap()
+        .graph;
+    let texture = device
+        .create_texture(TextureDescriptor {
+            texture: descriptor,
+            usage: TextureUsage::from_kinds([
+                TextureUsageKind::StorageWrite,
+                TextureUsageKind::StorageRead,
+                TextureUsageKind::CopySource,
+            ]),
+            memory: MemoryPolicy::DeviceOnly,
+        })
+        .unwrap();
+    let buffer = device
+        .create_buffer(BufferDescriptor {
+            buffer: BufferDesc { size: 256 },
+            usage: BufferUsage::from_kinds([
+                BufferUsageKind::StorageRead,
+                BufferUsageKind::StorageWrite,
+                BufferUsageKind::CopySource,
+                BufferUsageKind::CopyDestination,
+            ]),
+            memory: MemoryPolicy::DeviceOnly,
+        })
+        .unwrap();
+    let buffer_state = crate::imp::upload_buffer_for_test(
+        &device.inner,
+        buffer.native(),
+        buffer.lease().into(),
+        &vec![0; 256],
+    )
+    .unwrap();
+    let resources = Resources {
+        device: device.identity(),
+        buffers: HashMap::from([(BufferBindingId::new(2), (buffer, buffer_state))]),
+        textures: HashMap::from([(
+            TextureBindingId::new(1),
+            (texture, ResourceAccessState::Undefined),
+        )]),
+    };
+    let mut inputs = FrameInputs::new(());
+    inputs.bind_texture(texture_slot.slot, TextureBindingId::new(1));
+    inputs.bind_buffer(buffer_slot.slot, BufferBindingId::new(2));
+    let mut provider = ComputeObjectProvider::new(&device);
+    for (id, kernel, bindings) in [
+        (
+            store_pipeline,
+            ComputeKernel::TextureStoreRgba8,
+            store_bindings,
+        ),
+        (
+            load_pipeline,
+            ComputeKernel::TextureLoadRgba8,
+            load_bindings,
+        ),
+    ] {
+        provider
+            .register_pipeline(id, device.create_compute_pipeline(kernel).unwrap())
+            .unwrap();
+        provider.register_bindings(bindings, id).unwrap();
+    }
+    let executor = FrameExecutor::new(backend_instance);
+    let mut frame = executor
+        .execute(
+            &compiled,
+            compiled.instantiate_local(inputs),
+            &resources,
+            &provider,
+        )
+        .unwrap();
+    let completion = frame.submission.completion().clone();
+    executor
+        .try_backend()
+        .unwrap()
+        .wait(&completion, Duration::from_secs(10))
+        .unwrap();
+    assert_eq!(
+        frame.submission.status().unwrap(),
+        CompletionStatus::Complete
+    );
+    let exported_texture = frame.exports.texture(texture_export).unwrap();
+    let pixels = crate::imp::readback_texture_for_test(
+        &device.inner,
+        exported_texture.physical.native(),
+        exported_texture.lease.clone(),
+        exported_texture.descriptor,
+        exported_texture.outgoing_state,
+    )
+    .unwrap()
+    .tight;
+    let expected_pixel = [64, 128, 191, 255];
+    assert_eq!(
+        pixels,
+        expected_pixel.repeat(12),
+        "S01/{backend:?} texture storage store exact oracle"
+    );
+    let exported_buffer = frame.exports.buffer(buffer_export).unwrap();
+    let values = readback_exported_buffer_for_test(&device, exported_buffer).unwrap();
+    let packed = 0xFFBF_8040u32.to_le_bytes();
+    eprintln!(
+        "S01/{backend:?} observed storage-load bytes={:?}",
+        &values[..48]
+    );
+    assert_eq!(
+        &values[..48],
+        packed.repeat(12).as_slice(),
+        "S01/{backend:?} texture storage load exact oracle"
+    );
+    assert!(
+        values[48..].iter().all(|b| *b == 0),
+        "S01/{backend:?} untouched storage buffer tail"
+    );
+    let diagnostics = crate::imp::validation_diagnostics(&device.inner);
+    assert!(
+        diagnostics.is_empty(),
+        "S01/{backend:?} diagnostics: {diagnostics:#?}"
+    );
+    let commit = std::env::var("FLUXEL_TEST_COMMIT").unwrap_or_else(|_| "working-tree".into());
+    eprintln!(
+        "artifact case=S01 backend={backend:?} commit={commit} os={}; hardware={:?}; canonical_plan_label=S01-store-load-readback-v1; execution_plan={:?}; store={:?}; load={:?}; texture_descriptor={descriptor:?}; texture_oracle={expected_pixel:?}x12; buffer_oracle=0xFFBF8040x12; completion=Complete; diagnostics={diagnostics:?}",
+        std::env::consts::OS,
+        device.hardware(),
+        compiled.execution_plan(),
+        ComputeKernel::TextureStoreRgba8.portable_identity(),
+        ComputeKernel::TextureLoadRgba8.portable_identity()
+    );
+}
+
+fn run_s01_store_only(backend: crate::Backend, device: Device) {
+    crate::imp::clear_validation_diagnostics(&device.inner);
+    let descriptor = TextureDesc {
+        dimension: TextureDimension::D2,
+        extent: Extent3d {
+            width: 4,
+            height: 3,
+            depth: 1,
+        },
+        mip_levels: 1,
+        array_layers: 1,
+        sample_count: 1,
+        format: TextureFormat::Rgba8Unorm,
+    };
+    // Compile-only proof: the rejected read performs no native work.
+    let backend_instance = ComputeBackend::new(device.clone());
+    let mut denied = RenderGraph::new();
+    let denied_slot = denied.import_texture_slot(
+        "s01-denied-read",
+        ImportTextureContract {
+            descriptor,
+            initial_state: ResourceAccessState::CopyDestination,
+            ownership: ExternalOwnership::Caller,
+            initial_contents: InitialContents::Defined,
+        },
+    );
+    let denied_buffer = denied.create_buffer("s01-denied-output", BufferDesc { size: 4 });
+    let denied_pass = denied.add_compute_pass(
+        "s01-denied-read",
+        |pass| {
+            let read = pass.read_texture(
+                &denied_slot.version,
+                TextureReadUse::Storage,
+                TextureRange::Whole,
+            );
+            let (out, _) = pass.write_buffer(
+                denied_buffer,
+                BufferWriteUse::Storage,
+                BufferRange::Whole,
+                WriteCoverage::Full,
+            );
+            (out, read)
+        },
+        |commands, _, _, _: &()| commands.dispatch([1, 1, 1]),
+    );
+    denied.export_buffer(
+        denied_pass.output,
+        ExportBufferContract {
+            final_state: ResourceAccessState::CopySource,
+        },
+    );
+    let denied_error = match denied.compile(backend_instance.capabilities()) {
+        Err(error) => error,
+        Ok(_) => panic!("DX12 storage read unexpectedly compiled"),
+    };
+    assert_eq!(
+        denied_error.kind,
+        CompileErrorKind::UnsupportedSemanticRequirement
+    );
+    assert!(matches!(
+        denied_error
+            .context
+            .unsupported
+            .as_deref()
+            .map(|value| &value.requirement),
+        Some(CapabilityRequirement::TextureState {
+            format: TextureFormat::Rgba8Unorm,
+            sample_count: 1,
+            state: ResourceAccessState::ShaderStorageRead
+        })
+    ));
+    let mut graph = RenderGraph::new();
+    let slot = graph.import_texture_slot(
+        "s01-store-rgba8",
+        ImportTextureContract {
+            descriptor,
+            initial_state: ResourceAccessState::Undefined,
+            ownership: ExternalOwnership::Caller,
+            initial_contents: InitialContents::Undefined,
+        },
+    );
+    let pipeline_id = ComputePipelineId::new(811);
+    let bindings_id = BindingSetId::new(812);
+    let store = graph.add_compute_pass(
+        "s01-store",
+        |pass| {
+            let (out, texture) = pass.write_texture(
+                slot.version,
+                TextureWriteUse::Storage,
+                TextureRange::Whole,
+                WriteCoverage::Full,
+            );
+            (out, (texture, pipeline_id, bindings_id))
+        },
+        |commands, resolver, data, _| {
+            commands.set_pipeline(data.1)?;
+            let bound = resolver.resolve_bindings(
+                data.2,
+                &[BindingResource::TextureWrite(&data.0)],
+                &[],
+            )?;
+            commands.set_bindings(&bound)?;
+            commands.dispatch([1, 1, 1])
+        },
+    );
+    let export = graph.export_texture(
+        store.output,
+        ExportTextureContract {
+            final_state: ResourceAccessState::CopySource,
+        },
+    );
+    let compiled = graph
+        .compile(backend_instance.capabilities())
+        .unwrap()
+        .graph;
+    let texture = device
+        .create_texture(TextureDescriptor {
+            texture: descriptor,
+            usage: TextureUsage::from_kinds([
+                TextureUsageKind::StorageWrite,
+                TextureUsageKind::CopySource,
+            ]),
+            memory: MemoryPolicy::DeviceOnly,
+        })
+        .unwrap();
+    let resources = Resources {
+        device: device.identity(),
+        buffers: HashMap::new(),
+        textures: HashMap::from([(
+            TextureBindingId::new(1),
+            (texture, ResourceAccessState::Undefined),
+        )]),
+    };
+    let mut inputs = FrameInputs::new(());
+    inputs.bind_texture(slot.slot, TextureBindingId::new(1));
+    let mut provider = ComputeObjectProvider::new(&device);
+    provider
+        .register_pipeline(
+            pipeline_id,
+            device
+                .create_compute_pipeline(ComputeKernel::TextureStoreRgba8)
+                .unwrap(),
+        )
+        .unwrap();
+    provider
+        .register_bindings(bindings_id, pipeline_id)
+        .unwrap();
+    let executor = FrameExecutor::new(backend_instance);
+    let frame = executor
+        .execute(
+            &compiled,
+            compiled.instantiate_local(inputs),
+            &resources,
+            &provider,
+        )
+        .unwrap();
+    let completion = frame.submission.completion().clone();
+    executor
+        .try_backend()
+        .unwrap()
+        .wait(&completion, Duration::from_secs(10))
+        .unwrap();
+    let exported = frame.exports.texture(export).unwrap();
+    let pixels = crate::imp::readback_texture_for_test(
+        &device.inner,
+        exported.physical.native(),
+        exported.lease.clone(),
+        exported.descriptor,
+        exported.outgoing_state,
+    )
+    .unwrap()
+    .tight;
+    assert_eq!(
+        pixels,
+        [64, 128, 191, 255].repeat(12),
+        "S01/{backend:?} storage-store exact oracle"
+    );
+    let diagnostics = crate::imp::validation_diagnostics(&device.inner);
+    assert!(
+        diagnostics.is_empty(),
+        "S01/{backend:?} diagnostics: {diagnostics:#?}"
+    );
+    let commit = std::env::var("FLUXEL_TEST_COMMIT").unwrap_or_else(|_| "working-tree".into());
+    eprintln!(
+        "artifact case=S01 backend={backend:?} commit={commit} os={}; hardware={:?}; supported_access=StorageWrite only; canonical_plan_label=S01-store-readback-v1; execution_plan={:?}; store={:?}; texture_oracle=[64,128,191,255]x12; completion=Complete; diagnostics={diagnostics:?}",
+        std::env::consts::OS,
+        device.hardware(),
+        compiled.execution_plan(),
+        ComputeKernel::TextureStoreRgba8.portable_identity()
+    );
 }
 
 pub(super) fn build_x01() -> RasterBufferCase {

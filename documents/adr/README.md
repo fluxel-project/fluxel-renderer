@@ -11,6 +11,7 @@ later be marked `Superseded by: ADR-NNNN`.
 
 ## Index
 
+- [ADR-0009: Keep the resource floor closed and reuse stateful](0009-resource-floor-and-reuse-safety.md)
 - [ADR-0008: Execute platform-specific test paths natively](0008-native-platform-test-gates.md)
 - [ADR-0007: Keep fixed renderer recipes closed](0007-closed-fixed-renderer-recipes.md)
 - [ADR-0006: Do not expose a general pipeline abstraction yet](0006-no-general-pipeline-yet.md)

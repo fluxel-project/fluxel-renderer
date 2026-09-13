@@ -15,28 +15,46 @@ pub(super) fn emit_transitions<B: ExecutionBackend>(
 ) -> Result<(), ExecutionError<B::Error>> {
     for transition in transitions {
         match (&physical[&transition.resource], transition.range) {
-            (PhysicalResource::Texture { physical, .. }, PlannedResourceRange::Texture(range)) => {
-                backend
-                    .transition_texture(
-                        encoder,
-                        physical,
-                        range,
-                        transition.before,
-                        transition.after,
-                    )
-                    .map_err(ExecutionError::Backend)?
-            }
-            (PhysicalResource::Buffer { physical, .. }, PlannedResourceRange::Buffer(range)) => {
-                backend
-                    .transition_buffer(
-                        encoder,
-                        physical,
-                        range,
-                        transition.before,
-                        transition.after,
-                    )
-                    .map_err(ExecutionError::Backend)?
-            }
+            (
+                PhysicalResource::Texture {
+                    physical,
+                    initial_state,
+                    ..
+                },
+                PlannedResourceRange::Texture(range),
+            ) => backend
+                .transition_texture(
+                    encoder,
+                    physical,
+                    range,
+                    if transition.before == crate::rhi::ResourceAccessState::Undefined {
+                        *initial_state
+                    } else {
+                        transition.before
+                    },
+                    transition.after,
+                )
+                .map_err(ExecutionError::Backend)?,
+            (
+                PhysicalResource::Buffer {
+                    physical,
+                    initial_state,
+                    ..
+                },
+                PlannedResourceRange::Buffer(range),
+            ) => backend
+                .transition_buffer(
+                    encoder,
+                    physical,
+                    range,
+                    if transition.before == crate::rhi::ResourceAccessState::Undefined {
+                        *initial_state
+                    } else {
+                        transition.before
+                    },
+                    transition.after,
+                )
+                .map_err(ExecutionError::Backend)?,
             _ => unreachable!("planned transition resource kind matches its range"),
         }
     }

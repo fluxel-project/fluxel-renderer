@@ -11,7 +11,7 @@ use crate::Geometry;
 use super::indexed::buffer_descriptor;
 use super::shared::{
     NEXT_GENERATION, RetainedUploadState, SnapshotDrawReservation, SnapshotUseError,
-    SnapshotUseGate,
+    SnapshotUseGate, completion_requires_retention,
 };
 
 /// The logical stream whose size could not be represented by the textured
@@ -522,7 +522,7 @@ fn poll_textured_slot(
         return;
     };
     match upload.status() {
-        Ok(CompletionStatus::Pending) => {}
+        Ok(status) if completion_requires_retention(status) => {}
         Ok(CompletionStatus::Complete) => {
             let TexturedUploadSlot::Pending(upload) =
                 core::mem::replace(slot, TexturedUploadSlot::Absent)
@@ -550,7 +550,7 @@ fn record_textured_completion(
     failure: &mut Option<TexturedIndexedMeshUploadFailure>,
 ) {
     match status {
-        CompletionStatus::Pending | CompletionStatus::Complete => {}
+        CompletionStatus::Pending | CompletionStatus::Unknown | CompletionStatus::Complete => {}
         CompletionStatus::Failed(reason) => {
             failure.get_or_insert(textured_completion_failure(stream, reason));
         }

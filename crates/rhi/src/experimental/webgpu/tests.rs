@@ -8,6 +8,67 @@ use crate::experimental::webgpu::js::BrowserRequestProvider;
 
 wasm_bindgen_test_configure!(run_in_browser);
 
+#[wasm_bindgen_test(async)]
+async fn fixed_resource_floor_and_compute_have_deterministic_map_read_oracles() {
+    let mut session = WebGpuSession::new(canvas())
+        .await
+        .expect("real WebGPU session for fixed resource conformance");
+    let frame = FixedResourceFrame {
+        resources: WebGpuResourceKey::new(17),
+        positions: &[[-1.0, -1.0], [3.0, -1.0], [-1.0, 3.0]],
+        indices: &[0, 1, 2],
+        tint: [1.0, 1.0, 1.0, 1.0],
+        sampled_rgba8: [12, 34, 56, 255],
+    };
+    assert!(matches!(
+        session.render_fixed_resources(frame),
+        Ok(WebGpuRenderOutcome::Submitted(_))
+    ));
+    session
+        .resource_conformance()
+        .await
+        .expect("fixed resource floor must pass browser validation and exact MAP_READ oracles");
+    dispose(&mut session).await;
+}
+
+#[wasm_bindgen_test(async)]
+async fn fixed_resource_registry_recreates_after_loss_and_disposal_joins_its_ticket() {
+    let mut session = WebGpuSession::new(canvas())
+        .await
+        .expect("real WebGPU session for retained-resource lifecycle");
+    let frame = || FixedResourceFrame {
+        resources: WebGpuResourceKey::new(91),
+        positions: &[[-1.0, -1.0], [3.0, -1.0], [-1.0, 3.0]],
+        indices: &[0, 1, 2],
+        tint: [1.0, 1.0, 1.0, 1.0],
+        sampled_rgba8: [12, 34, 56, 255],
+    };
+    assert!(matches!(
+        session.render_fixed_resources(frame()),
+        Ok(WebGpuRenderOutcome::Submitted(_))
+    ));
+    // This drops the registry's reference only: the first accepted submission
+    // remains ticket-owned until completion, and this key receives a fresh
+    // physical set on its next use.
+    session.retire_fixed_resources(WebGpuResourceKey::new(91));
+    assert!(matches!(
+        session.render_fixed_resources(frame()),
+        Ok(WebGpuRenderOutcome::Submitted(_))
+    ));
+    session
+        .controlled_destroy_for_evidence()
+        .expect("destroy active device");
+    lose(&mut session).await;
+    let recovery = session.recover().expect("recover after loss");
+    JsFuture::from(recovery).await.expect("recovery succeeds");
+    assert_eq!(session.generation(), 2);
+    assert!(matches!(
+        session.render_fixed_resources(frame()),
+        Ok(WebGpuRenderOutcome::Submitted(_))
+    ));
+    dispose(&mut session).await;
+}
+
 struct PendingRequest {
     target: JsValue,
     kind: RequestKind,

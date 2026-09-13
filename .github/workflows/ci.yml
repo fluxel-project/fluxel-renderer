@@ -87,7 +87,7 @@ jobs:
       - run: python3 -c "from pathlib import Path; stage = Path('target/wasm-bindgen-smoke'); assert any(stage.glob('*.js')); assert any(stage.glob('*_bg.wasm'))"
 
   wasm-webgpu-contract:
-    name: WebGPU production request recovery contract
+    name: WebGPU production recovery and resource contracts
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -108,7 +108,7 @@ jobs:
           data['goog:chromeOptions']['binary']='${{ steps.chrome-with-driver.outputs.chrome-path }}';
           output.parent.mkdir(parents=True, exist_ok=True);
           output.write_text(json.dumps(data))"
-      - name: Run deferred native request recovery tests in Chrome
+      - name: Run production recovery and resource tests in Chrome
         run: >-
           cargo test -p fluxel-rhi
           --target wasm32-unknown-unknown
@@ -121,6 +121,42 @@ jobs:
           CHROMEDRIVER: ${{ steps.chrome-with-driver.outputs.chromedriver-path }}
           WASM_BINDGEN_TEST_TIMEOUT: "120"
           WASM_BINDGEN_TEST_WEBDRIVER_JSON: ${{ github.workspace }}/target/webgpu-webdriver.json
+
+  wasm-webgl2-contract:
+    name: WebGL2 fail-closed and resource contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: browser-actions/setup-chrome@v1
+        id: chrome-with-driver
+        with:
+          install-chromedriver: true
+      - run: cargo install wasm-bindgen-cli --version 0.2.128 --locked
+      - name: Bind the matching Chrome binary to WebDriver
+        run: >-
+          python3 -c "import json, pathlib;
+          source=pathlib.Path('scripts/webgpu_webdriver.json');
+          output=pathlib.Path('target/webgl2-webdriver.json');
+          data=json.loads(source.read_text());
+          data['goog:chromeOptions']['binary']='${{ steps.chrome-with-driver.outputs.chrome-path }}';
+          output.parent.mkdir(parents=True, exist_ok=True);
+          output.write_text(json.dumps(data))"
+      - name: Run fail-closed and fixed resource-floor tests in Chrome
+        run: >-
+          cargo test -p fluxel-rhi
+          --target wasm32-unknown-unknown
+          --no-default-features
+          --features webgl2
+          --lib
+          --locked
+        env:
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
+          CHROMEDRIVER: ${{ steps.chrome-with-driver.outputs.chromedriver-path }}
+          WASM_BINDGEN_TEST_TIMEOUT: "120"
+          WASM_BINDGEN_TEST_WEBDRIVER_JSON: ${{ github.workspace }}/target/webgl2-webdriver.json
 
   cross-repo-browser-smoke:
     name: Exact-revision ${{ matrix.backend }} WASM to JSBridge Chrome smoke

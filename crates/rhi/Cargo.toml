@@ -9,7 +9,7 @@ repository = "https://github.com/fluxel-project/fluxel-rendering"
 readme = "README.md"
 
 [dependencies]
-fluxel-rendergraph = { path = "../rendergraph", version = "0.11.1" }
+fluxel-rendergraph = { path = "../rendergraph", version = "0.12.0" }
 raw-window-handle = "0.6.2"
 
 [features]
@@ -43,7 +43,8 @@ js-sys = { version = "0.3.77", optional = true }
 wasm-bindgen = "0.2.100"
 wasm-bindgen-futures = { version = "0.4.50", optional = true }
 web-sys = { version = "0.3.77", optional = true, features = [
-    "HtmlCanvasElement", "WebGl2RenderingContext", "WebGlBuffer",
+    "Window", "Document", "HtmlCanvasElement", "WebGl2RenderingContext", "WebGlBuffer",
+    "WebGlFramebuffer", "WebGlSampler", "WebGlTexture",
     "WebGlProgram", "WebGlShader", "WebGlSync", "WebGlUniformLocation",
     "WebGlVertexArrayObject", "WebGlContextEvent", "console",
 ] }

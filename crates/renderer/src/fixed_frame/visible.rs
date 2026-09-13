@@ -191,15 +191,16 @@ impl VisibleFrameSubmission {
 
     fn poll_upload(&mut self, upload: PendingBufferUpload) -> VisibleFrameStatus {
         match upload.status() {
-            Ok(CompletionStatus::Pending) => {
+            Ok(status) if completion_requires_retention(status) => {
                 self.phase = VisiblePhase::Uploading(upload);
                 VisibleFrameStatus::Pending
             }
             Ok(CompletionStatus::Complete) => match upload.finalize() {
                 Ok(uniform) => self.submit_raster(uniform),
-                Err(incomplete) => self.finish_pre_accept(FixedFrameFailure::UniformObservation(
-                    FixedFrameUniformObservationError::Finalize(incomplete.status()),
-                )),
+                Err(incomplete) => {
+                    self.phase = VisiblePhase::Uploading(incomplete.into_pending());
+                    VisibleFrameStatus::Pending
+                }
             },
             Ok(CompletionStatus::Failed(error)) => {
                 self.finish_pre_accept(FixedFrameFailure::UniformCompletion(error))
@@ -266,7 +267,7 @@ impl VisibleFrameSubmission {
                     error,
                 )),
             )),
-            Ok(CompletionStatus::Pending) => {
+            Ok(status) if completion_requires_retention(status) => {
                 self.phase = VisiblePhase::RasterAccepted(frame);
                 VisibleFrameStatus::Pending
             }

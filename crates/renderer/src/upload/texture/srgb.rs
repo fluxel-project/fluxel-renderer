@@ -16,6 +16,7 @@ use crate::BasicMaterial;
 
 use super::super::shared::{
     NEXT_GENERATION, SnapshotDrawReservation, SnapshotUseError, SnapshotUseGate,
+    completion_requires_retention,
 };
 
 /// A tightly packed, immutable RGBA8 image whose RGB bytes are IEC sRGB
@@ -249,7 +250,7 @@ impl SrgbBaseColorTextureUpload {
     pub fn poll(&mut self) -> SrgbBaseColorTextureUploadStatus {
         if let Some(pending) = self.pending.as_ref() {
             match pending.status() {
-                Ok(CompletionStatus::Pending) => {}
+                Ok(status) if completion_requires_retention(status) => {}
                 Ok(CompletionStatus::Complete) => {
                     let pending = self.pending.take().expect("pending upload was observed");
                     match pending.finalize() {
@@ -286,7 +287,7 @@ impl SrgbBaseColorTextureUpload {
 
     fn record_status(&mut self, status: CompletionStatus) {
         match status {
-            CompletionStatus::Pending | CompletionStatus::Complete => {}
+            CompletionStatus::Pending | CompletionStatus::Unknown | CompletionStatus::Complete => {}
             CompletionStatus::Failed(failure) => {
                 self.failure
                     .get_or_insert(SrgbBaseColorTextureUploadFailure::Completion(failure));

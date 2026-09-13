@@ -667,11 +667,10 @@ impl ExecutionBackend for RasterBackend {
         }
     }
     fn completion_status(&self, completion: &NativeCompletion) -> CompletionStatus {
-        // The trait exposes a total status query. A native query failure cannot
-        // safely be reported as Pending or Complete, so collapse it to the
-        // terminal conservative failure used by portable execution.
-        crate::imp::completion_status(&completion.0)
-            .unwrap_or(CompletionStatus::Failed(CompletionFailure::DeviceLost))
+        // The trait exposes a total status query. A native observation error
+        // proves neither completion nor terminal failure, so keep the work
+        // quarantined as Unknown.
+        crate::imp::completion_status(&completion.0).unwrap_or(CompletionStatus::Unknown)
     }
     fn retire(&mut self, completion: NativeCompletion, leases: Vec<ResourceLease>) {
         self.retired.push(Retired { completion, leases });
@@ -684,8 +683,9 @@ impl ExecutionBackend for RasterBackend {
         // terminal status; releasing them here could destroy in-flight handles.
         self.retired.retain(
             |entry| match crate::imp::completion_status(&entry.completion.0) {
-                Ok(CompletionStatus::Pending) => true,
-                Ok(_) => false,
+                Ok(CompletionStatus::Pending | CompletionStatus::Unknown) => true,
+                Ok(CompletionStatus::Complete | CompletionStatus::Failed(_)) => false,
+                Ok(_) => true,
                 Err(value) => {
                     error.get_or_insert(value);
                     true

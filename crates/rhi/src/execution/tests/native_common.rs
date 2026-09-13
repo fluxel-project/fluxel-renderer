@@ -2,7 +2,7 @@
 
 use super::native_compute::{
     build_k01, build_k02, build_x01, hardware_guard, run_c02, run_compute_case_bundle, run_k02,
-    run_x01, run_x01_case,
+    run_s01, run_t01_transient_reuse, run_x01, run_x01_case,
 };
 use super::native_compute_negative::run_compute_negative_paths;
 use super::native_copy::{run_c01, run_c03};
@@ -125,6 +125,32 @@ impl RenderObjectProvider<CopyBackend> for NoObjects {
         _: &[ResolvedBindingResource<'_, Texture, Buffer>],
         _: &[u32],
     ) -> Result<BoundBindings<UnsupportedBindings, ResourceLease>, RecordingError> {
+        Err(no_object())
+    }
+}
+
+// T01 uses ComputeBackend solely because its test-only observation sink lives
+// there; its graph contains only copy passes, so every object lookup remains a
+// fail-closed guard.
+impl RenderObjectProvider<ComputeBackend> for NoObjects {
+    fn raster_pipeline(
+        &self,
+        _: RasterPipelineId,
+    ) -> Result<BoundRasterPipeline<UnsupportedRasterPipeline, ResourceLease>, RecordingError> {
+        Err(no_object())
+    }
+    fn compute_pipeline(
+        &self,
+        _: ComputePipelineId,
+    ) -> Result<BoundComputePipeline<ComputePipeline, ResourceLease>, RecordingError> {
+        Err(no_object())
+    }
+    fn bindings(
+        &self,
+        _: BindingSetId,
+        _: &[ResolvedBindingResource<'_, Texture, Buffer>],
+        _: &[u32],
+    ) -> Result<BoundBindings<ComputeBindings, ResourceLease>, RecordingError> {
         Err(no_object())
     }
 }
@@ -254,6 +280,26 @@ native_case!(k02_dx12_ordered_add_multiply, run_k02, crate::Backend::Dx12);
 native_case!(
     k02_vulkan_ordered_add_multiply,
     run_k02,
+    crate::Backend::Vulkan
+);
+native_case!(
+    t01_dx12_cross_frame_transient_reuse,
+    run_t01_transient_reuse,
+    crate::Backend::Dx12
+);
+native_case!(
+    t01_vulkan_cross_frame_transient_reuse,
+    run_t01_transient_reuse,
+    crate::Backend::Vulkan
+);
+native_case!(
+    s01_dx12_storage_texture_store_load,
+    run_s01,
+    crate::Backend::Dx12
+);
+native_case!(
+    s01_vulkan_storage_texture_store_load,
+    run_s01,
     crate::Backend::Vulkan
 );
 native_case!(r01_dx12_clear_triangle, run_r01, crate::Backend::Dx12);

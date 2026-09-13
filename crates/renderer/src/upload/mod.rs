@@ -19,4 +19,4 @@ pub use texture::*;
 pub use textured::*;
 pub use vertex_color::*;
 
-pub(crate) use shared::{SnapshotDrawReservation, SnapshotUseError};
+pub(crate) use shared::{SnapshotDrawReservation, SnapshotUseError, completion_requires_retention};

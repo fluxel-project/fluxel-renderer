@@ -14,7 +14,7 @@ use super::super::{
     indexed::buffer_descriptor,
     shared::{
         NEXT_GENERATION, RetainedUploadState, SnapshotDrawReservation, SnapshotUseError,
-        SnapshotUseGate,
+        SnapshotUseGate, completion_requires_retention,
     },
 };
 use super::domain::{VertexColorGeometry, VertexColorGeometryStream, VertexColorMeshPayload};
@@ -333,7 +333,7 @@ fn poll_slot(
         return;
     };
     match upload.status() {
-        Ok(CompletionStatus::Pending) => {}
+        Ok(status) if completion_requires_retention(status) => {}
         Ok(CompletionStatus::Complete) => {
             let UploadSlot::Pending(upload) = core::mem::replace(slot, UploadSlot::Absent) else {
                 unreachable!()
@@ -359,7 +359,7 @@ fn record_completion(
     failure: &mut Option<VertexColorIndexedMeshUploadFailure>,
 ) {
     match status {
-        CompletionStatus::Pending | CompletionStatus::Complete => {}
+        CompletionStatus::Pending | CompletionStatus::Unknown | CompletionStatus::Complete => {}
         CompletionStatus::Failed(reason) => {
             failure.get_or_insert(completion_failure(stream, reason));
         }

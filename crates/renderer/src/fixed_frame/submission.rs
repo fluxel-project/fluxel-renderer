@@ -112,17 +112,15 @@ impl FixedFrameSubmission {
 
     fn poll_upload(&mut self, upload: PendingBufferUpload) -> FixedFrameStatus {
         match upload.status() {
-            Ok(CompletionStatus::Pending) => {
+            Ok(status) if completion_requires_retention(status) => {
                 self.phase = CameraPhase::Uploading(upload);
                 FixedFrameStatus::Pending
             }
             Ok(CompletionStatus::Complete) => match upload.finalize() {
                 Ok(uniform) => self.submit_raster(uniform),
                 Err(incomplete) => {
-                    self.finish_pre_accept(FixedFrameFailure::UniformObservation(
-                        FixedFrameUniformObservationError::Finalize(incomplete.status()),
-                    ));
-                    FixedFrameStatus::Failed(self.failure.clone().unwrap())
+                    self.phase = CameraPhase::Uploading(incomplete.into_pending());
+                    FixedFrameStatus::Pending
                 }
             },
             Ok(CompletionStatus::Failed(error)) => {
@@ -229,7 +227,7 @@ impl FixedFrameSubmission {
             Err(error) => self.finish_accepted(FixedFrameFailure::RasterObservation(
                 FixedFrameRasterObservationError::Execution(execution_error(error)),
             )),
-            Ok(CompletionStatus::Pending) => {
+            Ok(status) if completion_requires_retention(status) => {
                 self.phase = CameraPhase::RasterAccepted(frame);
                 FixedFrameStatus::Pending
             }

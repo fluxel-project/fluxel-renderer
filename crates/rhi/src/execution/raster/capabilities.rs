@@ -94,11 +94,20 @@ impl RasterBackend {
 
 fn raster_capabilities(device: &Device) -> DeviceCapabilities {
     let facts = device.capabilities();
-    raster_capabilities_from_limit_and_filterability(
+    let mut capabilities = raster_capabilities_from_limit_and_filterability(
         facts.max_compute_workgroups_per_dimension,
         facts.rgba8_unorm_filterable,
         facts.rgba8_unorm_srgb_filterable,
-    )
+    );
+    if let Some(format) = capabilities
+        .texture_formats
+        .iter_mut()
+        .find(|format| format.format == TextureFormat::Rgba8Unorm)
+    {
+        format.storage_read = facts.rgba8_unorm_storage_read_enabled;
+        format.storage_write = facts.rgba8_unorm_storage_write;
+    }
+    capabilities
 }
 
 #[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
@@ -141,7 +150,11 @@ pub(in crate::execution) fn raster_capabilities_from_limit_and_filterability(
         .transitions(TransitionCapabilities::GraphManagedExplicit)
         .synchronization(SynchronizationCapabilities::SingleQueueOrdering)
         .timestamps(TimestampCapabilities::Unsupported)
-        .transient_resources(TransientResourceCapabilities::new(false, false, false))
+        // The raster profile shares the same owned DeviceOnly allocation and
+        // completion contract as CopyBackend.  Cross-frame reuse is valid;
+        // in-frame aliasing remains unsupported because no alias barrier is
+        // recorded by the fixed recipe implementation.
+        .transient_resources(TransientResourceCapabilities::new(true, false, false))
         .limits(DeviceLimits::new(1, 256).with_max_compute_workgroups_per_dimension(maximum))
         .buffers(BufferCapabilities::new(true, true, false))
         .texture_format(

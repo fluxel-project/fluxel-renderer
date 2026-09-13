@@ -94,6 +94,7 @@ pub(super) fn build_exports<B: ExecutionBackend, F>(
                 let PhysicalResource::Texture {
                     physical,
                     descriptor,
+                    ..
                 } = &physical[&resource]
                 else {
                     unreachable!()
@@ -112,6 +113,7 @@ pub(super) fn build_exports<B: ExecutionBackend, F>(
                 let PhysicalResource::Buffer {
                     physical,
                     descriptor,
+                    ..
                 } = &physical[&resource]
                 else {
                     unreachable!()

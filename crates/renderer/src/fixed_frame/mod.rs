@@ -32,7 +32,7 @@ use fluxel_rhi::{
     presentation::{AcquiredSurfaceFrame, PresentationToken, Surface},
 };
 
-use crate::upload::{SnapshotDrawReservation, SnapshotUseError};
+use crate::upload::{SnapshotDrawReservation, SnapshotUseError, completion_requires_retention};
 use crate::{
     BaseColorTextureSnapshot, IndexedMeshSnapshot, NormalIndexedMeshSnapshot,
     SrgbBaseColorTextureSnapshot, SrgbTexturedBasicMaterial, TexturedBasicMaterial,

@@ -20,6 +20,18 @@ pub(super) fn texture_pack_is_a_distinct_closed_compute_recipe() {
     assert_eq!(pack.binding_recipe_version, 2);
 }
 
+pub(super) fn storage_texture_recipes_are_distinct_and_closed() {
+    let store = ComputeKernel::TextureStoreRgba8.portable_identity();
+    let load = ComputeKernel::TextureLoadRgba8.portable_identity();
+    assert_eq!(store.entry_point, "store_rgba8");
+    assert_eq!(load.entry_point, "load_rgba8");
+    assert_eq!(store.workgroup_size, [8, 8, 1]);
+    assert_eq!(load.workgroup_size, [8, 8, 1]);
+    assert_eq!(store.binding_recipe_version, 3);
+    assert_eq!(load.binding_recipe_version, 4);
+    assert_ne!(store.module_source_hash, load.module_source_hash);
+}
+
 pub(super) fn raster_identities_are_portable_but_recipes_remain_distinct() {
     let triangle = RasterKernel::Triangle.portable_identity();
     let indexed = RasterKernel::IndexedPositionColor.portable_identity();

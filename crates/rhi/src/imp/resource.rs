@@ -397,6 +397,22 @@ impl Drop for NativeComputeBindings {
                 // keeps the layout/device live until this one-time destruction.
                 device.destroy_bind_group(group);
             },
+            #[cfg(feature = "dx12")]
+            (
+                NativeDevice::Dx12 { device, .. },
+                NativeComputeBindingsInner::Dx12Texture { group, view },
+            ) => unsafe {
+                device.destroy_bind_group(group);
+                device.destroy_texture_view(view);
+            },
+            #[cfg(feature = "vulkan")]
+            (
+                NativeDevice::Vulkan { device, .. },
+                NativeComputeBindingsInner::VulkanTexture { group, view },
+            ) => unsafe {
+                device.destroy_bind_group(group);
+                device.destroy_texture_view(view);
+            },
             _ => unreachable!("bindings and pipeline backend always match"),
         }
     }

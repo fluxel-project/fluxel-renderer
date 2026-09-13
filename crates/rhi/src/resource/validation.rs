@@ -169,6 +169,27 @@ pub(super) fn validate_texture_pack_texture(texture: &Texture) -> Result<(), Com
     validate_texture_pack_texture_desc(texture.descriptor().texture, texture.allowed_usage())
 }
 
+/// Validates the exact whole-image storage texture shape used by the two
+/// fixed storage recipes. No view ranges, formats, or access modes escape
+/// this closed boundary.
+pub(super) fn validate_storage_rgba8_texture(
+    texture: &Texture,
+    required_usage: TextureUsageKind,
+) -> Result<(), ComputeCreateError> {
+    let image = texture.descriptor().texture;
+    if image.dimension != TextureDimension::D2
+        || image.format != TextureFormat::Rgba8Unorm
+        || image.extent.depth != 1
+        || image.mip_levels != 1
+        || image.array_layers != 1
+        || image.sample_count != 1
+        || !texture.allowed_usage().contains(required_usage)
+    {
+        return Err(ComputeCreateError::BindingRecipeMismatch);
+    }
+    Ok(())
+}
+
 /// Validates the descriptor facts the X01 texture binding cannot generalize.
 pub(super) fn validate_texture_pack_texture_desc(
     image: TextureDesc,

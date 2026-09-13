@@ -11,7 +11,7 @@ use crate::Geometry;
 use super::indexed::buffer_descriptor;
 use super::shared::{
     NEXT_GENERATION, RetainedUploadState, SnapshotDrawReservation, SnapshotUseError,
-    SnapshotUseGate,
+    SnapshotUseGate, completion_requires_retention,
 };
 
 /// The logical stream represented by the closed normal-geometry upload ABI.
@@ -589,7 +589,7 @@ fn poll_normal_slot(
         return;
     };
     match upload.status() {
-        Ok(CompletionStatus::Pending) => {}
+        Ok(status) if completion_requires_retention(status) => {}
         Ok(CompletionStatus::Complete) => {
             let NormalUploadSlot::Pending(upload) =
                 core::mem::replace(slot, NormalUploadSlot::Absent)
@@ -618,7 +618,7 @@ fn record_normal_completion(
     failure: &mut Option<NormalIndexedMeshUploadFailure>,
 ) {
     match status {
-        CompletionStatus::Pending | CompletionStatus::Complete => {}
+        CompletionStatus::Pending | CompletionStatus::Unknown | CompletionStatus::Complete => {}
         CompletionStatus::Failed(reason) => {
             failure.get_or_insert(normal_completion_failure(stream, reason));
         }

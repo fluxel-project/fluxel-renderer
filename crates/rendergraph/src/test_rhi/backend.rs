@@ -59,6 +59,8 @@ impl std::error::Error for TestRhiError {}
 pub struct TestEncoder {
     queue: QueueId,
     events: Vec<TestTraceEvent>,
+    texture_states: HashMap<TestTexture, ResourceAccessState>,
+    buffer_states: HashMap<TestBuffer, ResourceAccessState>,
 }
 
 /// A completed test command buffer.
@@ -91,6 +93,8 @@ pub struct TestRhi {
     fail_submit: Option<TestRhiError>,
     transient_texture_usage: Option<TextureUsage>,
     transient_buffer_usage: Option<BufferUsage>,
+    texture_states: HashMap<TestTexture, ResourceAccessState>,
+    buffer_states: HashMap<TestBuffer, ResourceAccessState>,
 }
 
 impl TestRhi {
@@ -111,6 +115,8 @@ impl TestRhi {
             fail_submit: None,
             transient_texture_usage: None,
             transient_buffer_usage: None,
+            texture_states: HashMap::new(),
+            buffer_states: HashMap::new(),
         }
     }
 
@@ -168,6 +174,17 @@ impl TestRhi {
             completion,
             CompletionStatus::Failed(crate::backend::CompletionFailure::ExecutionFailed),
         );
+    }
+
+    /// Makes a submitted token temporarily unobservable to completion polling.
+    pub fn unknown(&mut self, completion: TestCompletion) {
+        self.completion
+            .insert(completion, CompletionStatus::Unknown);
+    }
+
+    /// Replaces the device identity for generation-isolation contract tests.
+    pub fn set_device_identity(&mut self, identity: DeviceIdentity) {
+        self.identity = identity;
     }
 
     /// Returns the number of retirement entries that still retain leases.
@@ -230,6 +247,8 @@ impl ExecutionBackend for TestRhi {
     ) -> Result<BoundTexture<TestTexture, TestLease>, TestRhiError> {
         self.failure()?;
         let physical = TestTexture::new(self.allocate());
+        self.texture_states
+            .insert(physical, ResourceAccessState::Undefined);
         let (lease, _) = TestLease::fresh();
         if self.trace_enabled {
             self.trace.push(TestTraceEvent::CreateTexture {
@@ -256,6 +275,8 @@ impl ExecutionBackend for TestRhi {
     ) -> Result<BoundBuffer<TestBuffer, TestLease>, TestRhiError> {
         self.failure()?;
         let physical = TestBuffer::new(self.allocate());
+        self.buffer_states
+            .insert(physical, ResourceAccessState::Undefined);
         let (lease, _) = TestLease::fresh();
         if self.trace_enabled {
             self.trace.push(TestTraceEvent::CreateBuffer {
@@ -280,6 +301,8 @@ impl ExecutionBackend for TestRhi {
         Ok(TestEncoder {
             queue: _queue,
             events: vec![TestTraceEvent::BeginEncoder { queue: _queue }],
+            texture_states: self.texture_states.clone(),
+            buffer_states: self.buffer_states.clone(),
         })
     }
 
@@ -292,6 +315,13 @@ impl ExecutionBackend for TestRhi {
         _after: ResourceAccessState,
     ) -> Result<(), TestRhiError> {
         self.failure()?;
+        let actual = _encoder.texture_states.entry(*_texture).or_insert(_before);
+        if *actual != _before {
+            return Err(TestRhiError::new(
+                "texture transition before state differs from physical state",
+            ));
+        }
+        *actual = _after;
         self.record(
             _encoder,
             TestTraceEvent::TransitionTexture {
@@ -312,6 +342,15 @@ impl ExecutionBackend for TestRhi {
         _after: ResourceAccessState,
     ) -> Result<(), TestRhiError> {
         self.failure()?;
+        if matches!(_range, BufferRange::Whole) {
+            let actual = _encoder.buffer_states.entry(*_buffer).or_insert(_before);
+            if *actual != _before {
+                return Err(TestRhiError::new(
+                    "buffer transition before state differs from physical state",
+                ));
+            }
+            *actual = _after;
+        }
         self.record(
             _encoder,
             TestTraceEvent::TransitionBuffer {
@@ -612,6 +651,41 @@ impl ExecutionBackend for TestRhi {
                 "test command buffer was submitted to a different queue",
             ));
         }
+        for event in &_command_buffer.events {
+            match event {
+                TestTraceEvent::TransitionTexture {
+                    texture,
+                    before,
+                    after,
+                    ..
+                } => {
+                    let actual = self.texture_states.entry(*texture).or_insert(*before);
+                    if *actual != *before {
+                        return Err(TestRhiError::new(
+                            "submitted texture transition before state differs from physical state",
+                        ));
+                    }
+                    *actual = *after;
+                }
+                TestTraceEvent::TransitionBuffer {
+                    buffer,
+                    range,
+                    before,
+                    after,
+                } => {
+                    if matches!(range, BufferRange::Whole) {
+                        let actual = self.buffer_states.entry(*buffer).or_insert(*before);
+                        if *actual != *before {
+                            return Err(TestRhiError::new(
+                                "submitted buffer transition before state differs from physical state",
+                            ));
+                        }
+                        *actual = *after;
+                    }
+                }
+                _ => {}
+            }
+        }
         let completion = TestCompletion::new(self.next_completion);
         self.next_completion += 1;
         let presentations: Vec<_> = _presentations
@@ -660,13 +734,10 @@ impl ExecutionBackend for TestRhi {
         let completion = &self.completion;
         self.retired.retain(|entry| {
             let _ = entry.leases.len();
-            completion
-                .get(&entry.completion)
-                .copied()
-                .unwrap_or(CompletionStatus::Failed(
-                    crate::backend::CompletionFailure::ExecutionFailed,
-                ))
-                == CompletionStatus::Pending
+            matches!(
+                completion.get(&entry.completion).copied(),
+                Some(CompletionStatus::Pending | CompletionStatus::Unknown)
+            )
         });
         Ok(before - self.retired.len())
     }

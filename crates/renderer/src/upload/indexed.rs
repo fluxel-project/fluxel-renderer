@@ -14,7 +14,7 @@ use crate::Geometry;
 
 use super::shared::{
     NEXT_GENERATION, RetainedUploadState, SnapshotDrawReservation, SnapshotUseError,
-    SnapshotUseGate,
+    SnapshotUseGate, completion_requires_retention,
 };
 
 /// An immutable, GPU-ready indexed-mesh generation.
@@ -406,7 +406,7 @@ fn poll_slot(
         return;
     };
     match upload.status() {
-        Ok(CompletionStatus::Pending) => {}
+        Ok(status) if completion_requires_retention(status) => {}
         Ok(CompletionStatus::Complete) => {
             let UploadSlot::Pending(upload) = core::mem::replace(slot, UploadSlot::Absent) else {
                 unreachable!("slot was pending while completing it");

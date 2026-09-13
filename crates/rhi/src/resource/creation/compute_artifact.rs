@@ -10,6 +10,17 @@ impl Device {
         &self,
         kernel: ComputeKernel,
     ) -> Result<ComputePipeline, ComputeCreateError> {
+        match kernel {
+            ComputeKernel::TextureStoreRgba8 if !self.capabilities.rgba8_unorm_storage_write => {
+                return Err(ComputeCreateError::UnsupportedStorageTexture);
+            }
+            ComputeKernel::TextureLoadRgba8
+                if !self.capabilities.rgba8_unorm_storage_read_enabled =>
+            {
+                return Err(ComputeCreateError::UnsupportedStorageTexture);
+            }
+            _ => {}
+        }
         validate_compute_workgroup_limits(
             kernel.workgroup_size(),
             self.capabilities.max_compute_workgroup_size,
@@ -78,7 +89,8 @@ impl Device {
         Ok(ComputeBindings(Arc::new(ComputeBindingsShared {
             _native: native,
             pipeline: pipeline.clone(),
-            _buffer: buffer.lease(),
+            _buffer: Some(buffer.lease()),
+            _texture: None,
             offset,
             size,
             device: self.identity,
@@ -142,6 +154,95 @@ impl Device {
             pipeline: pipeline.clone(),
             _texture: texture.lease(),
             _buffer: buffer.lease(),
+            offset,
+            size,
+            device: self.identity,
+        })))
+    }
+
+    /// Creates the closed write-only RGBA8 storage-texture recipe.
+    pub fn create_texture_store_bindings(
+        &self,
+        pipeline: &ComputePipeline,
+        texture: &Texture,
+    ) -> Result<ComputeBindings, ComputeCreateError> {
+        if pipeline.kernel() != ComputeKernel::TextureStoreRgba8 {
+            return Err(ComputeCreateError::BindingRecipeMismatch);
+        }
+        if pipeline.device_identity() != self.identity || texture.device_identity() != self.identity
+        {
+            return Err(ComputeCreateError::ForeignDevice);
+        }
+        validate_storage_rgba8_texture(texture, TextureUsageKind::StorageWrite)?;
+        let native = crate::imp::create_texture_store_bindings(
+            &self.inner,
+            pipeline.native(),
+            texture.native(),
+        )
+        .map_err(ComputeCreateError::NativeFailure)?;
+        Ok(ComputeBindings(Arc::new(ComputeBindingsShared {
+            _native: native,
+            pipeline: pipeline.clone(),
+            _buffer: None,
+            _texture: Some(texture.lease()),
+            offset: 0,
+            size: 0,
+            device: self.identity,
+        })))
+    }
+
+    /// Creates the closed read-only RGBA8 storage-texture plus RW-buffer recipe.
+    pub fn create_texture_load_bindings(
+        &self,
+        pipeline: &ComputePipeline,
+        texture: &Texture,
+        buffer: &Buffer,
+        offset: u64,
+        size: u64,
+    ) -> Result<ComputeBindings, ComputeCreateError> {
+        if pipeline.kernel() != ComputeKernel::TextureLoadRgba8 {
+            return Err(ComputeCreateError::BindingRecipeMismatch);
+        }
+        if pipeline.device_identity() != self.identity
+            || texture.device_identity() != self.identity
+            || buffer.device_identity() != self.identity
+        {
+            return Err(ComputeCreateError::ForeignDevice);
+        }
+        validate_storage_rgba8_texture(texture, TextureUsageKind::StorageRead)?;
+        validate_compute_binding_range(
+            offset,
+            size,
+            buffer.descriptor().buffer.size,
+            self.capabilities.min_storage_buffer_offset_alignment,
+            self.capabilities.max_storage_buffer_binding_size,
+        )?;
+        if !buffer
+            .allowed_usage()
+            .contains(BufferUsageKind::StorageRead)
+            || !buffer
+                .allowed_usage()
+                .contains(BufferUsageKind::StorageWrite)
+        {
+            return Err(ComputeCreateError::StorageUsageRequired);
+        }
+        if size < texture_pack_required_size(texture.descriptor().texture)? {
+            return Err(ComputeCreateError::InvalidBindingRange);
+        }
+        let native = crate::imp::create_texture_load_bindings(
+            &self.inner,
+            pipeline.native(),
+            texture.native(),
+            buffer.native(),
+            offset,
+            size,
+        )
+        .map_err(ComputeCreateError::NativeFailure)?;
+        Ok(ComputeBindings(Arc::new(ComputeBindingsShared {
+            _native: native,
+            pipeline: pipeline.clone(),
+            _buffer: Some(buffer.lease()),
+            _texture: Some(texture.lease()),
             offset,
             size,
             device: self.identity,

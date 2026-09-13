@@ -193,6 +193,12 @@ pub struct HardwareCapabilities {
     /// This is a separate, unmodified adapter fact. In particular, Fluxel
     /// never infers sRGB filterability from the corresponding UNORM fact.
     pub rgba8_unorm_srgb_filterable: bool,
+    /// Whether the selected adapter exposes `Rgba8Unorm` storage-texture reads.
+    pub rgba8_unorm_storage_read: bool,
+    /// Whether the selected adapter exposes `Rgba8Unorm` storage-texture writes.
+    pub rgba8_unorm_storage_write: bool,
+    /// Whether adapter-specific texture format features were actually enabled.
+    pub rgba8_unorm_storage_read_enabled: bool,
     /// Maximum two-dimensional texture extent reported by the backend.
     pub max_texture_dimension_2d: u32,
     /// Maximum bind groups reported by the backend.

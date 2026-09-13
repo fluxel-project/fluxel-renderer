@@ -170,11 +170,18 @@ pub(crate) fn open_dx12_surface(
         let hardware = hardware(Backend::Dx12, &exposed.info);
         let rgba8_unorm_filterable = rgba8_unorm_filterable(&exposed.adapter);
         let rgba8_unorm_srgb_filterable = rgba8_unorm_srgb_filterable(&exposed.adapter);
+        let rgba8_unorm_storage_read = rgba8_unorm_storage_read(&exposed.adapter);
+        let rgba8_unorm_storage_write = rgba8_unorm_storage_write(&exposed.adapter);
+        // Match headless DX12: adapter-reported typed RGBA8 load has no
+        // end-to-end conformance proof, so it remains unavailable.
+        let enabled_features = wgt::Features::empty();
         let capabilities = capabilities(
-            exposed.features,
+            enabled_features,
             &exposed.capabilities,
             rgba8_unorm_filterable,
             rgba8_unorm_srgb_filterable,
+            rgba8_unorm_storage_read,
+            rgba8_unorm_storage_write,
         );
         let requested_limits = required_limits(Backend::Dx12, &exposed.capabilities)?;
         let adapter = exposed.adapter;
@@ -182,7 +189,7 @@ pub(crate) fn open_dx12_surface(
         // adapter; features remain intentionally empty for this fixed slice.
         let wgpu_hal::OpenDevice { device, queue } = unsafe {
             adapter.open(
-                wgt::Features::empty(),
+                enabled_features,
                 &requested_limits,
                 &wgt::MemoryHints::default(),
             )
@@ -252,17 +259,22 @@ pub(crate) fn open_vulkan_surface(
         let hardware = hardware(Backend::Vulkan, &exposed.info);
         let rgba8_unorm_filterable = rgba8_unorm_filterable(&exposed.adapter);
         let rgba8_unorm_srgb_filterable = rgba8_unorm_srgb_filterable(&exposed.adapter);
+        let rgba8_unorm_storage_read = rgba8_unorm_storage_read(&exposed.adapter);
+        let rgba8_unorm_storage_write = rgba8_unorm_storage_write(&exposed.adapter);
+        let enabled_features = storage_texture_features(exposed.features, rgba8_unorm_storage_read);
         let capabilities = capabilities(
-            exposed.features,
+            enabled_features,
             &exposed.capabilities,
             rgba8_unorm_filterable,
             rgba8_unorm_srgb_filterable,
+            rgba8_unorm_storage_read,
+            rgba8_unorm_storage_write,
         );
         let requested_limits = required_limits(Backend::Vulkan, &exposed.capabilities)?;
         let adapter = exposed.adapter;
         let wgpu_hal::OpenDevice { device, queue } = unsafe {
             adapter.open(
-                wgt::Features::empty(),
+                enabled_features,
                 &requested_limits,
                 &wgt::MemoryHints::default(),
             )

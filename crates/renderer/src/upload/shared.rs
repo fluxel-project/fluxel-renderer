@@ -5,7 +5,21 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use fluxel_rendergraph::CompletionStatus;
+
 pub(super) static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// Whether completion remains non-terminal and therefore retains every lease.
+///
+/// `Unknown` means the backend cannot prove completion, not that it proved a
+/// failure.  Renderer state machines must retain their pending upload/frame
+/// and report retryable progress until a terminal status is observed.
+pub(crate) const fn completion_requires_retention(status: CompletionStatus) -> bool {
+    matches!(
+        status,
+        CompletionStatus::Pending | CompletionStatus::Unknown
+    )
+}
 
 /// Why a ready snapshot cannot start another renderer draw.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -126,6 +140,18 @@ impl SnapshotUseGate {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = SnapshotUseState::Poisoned;
+    }
+
+    #[cfg(test)]
+    pub(super) fn active_readers(&self) -> usize {
+        match *self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        {
+            SnapshotUseState::Ready | SnapshotUseState::Poisoned => 0,
+            SnapshotUseState::Readers(readers) => readers,
+        }
     }
 }
 

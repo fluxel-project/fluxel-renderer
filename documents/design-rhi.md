@@ -285,15 +285,16 @@ constructed backends, satisfying HAL external synchronization. It does not
 provide multi-queue scheduling, parallel recording, command caching, or
 aliasing.
 
-Completion is `Pending`, `Complete`, or terminal `Failed(CompletionFailure)`.
-A known pre-submit failure returns `SubmitRejected` and transfers no work. If a
-native submission may have been accepted, RHI returns completion that can later
-fail and quarantines the command allocator/buffer, temporary views, private
-staging, bindings, resources, and leases. It never guesses outgoing state or
-releases data early. Dropping a pending `FrameSubmission` transfers completion
-and leases to non-blocking retirement; collection releases them only at a
-terminal state. This preserves safety without blocking destructors and is the
-rule in [ADR-0004](adr/0004-accepted-unknown-quarantine.md).
+Completion is `Pending`, `Unknown`, `Complete`, or terminal
+`Failed(CompletionFailure)`. A known pre-submit failure returns `SubmitRejected`
+and transfers no work. `Unknown` is nonterminal: it means acceptance or
+completion cannot yet be established, so RHI quarantines the command
+allocator/buffer, temporary views, private staging, bindings, resources, and
+leases exactly as it does for pending work. It never guesses outgoing state or
+releases data early. Dropping a nonterminal `FrameSubmission` transfers its
+completion and leases to non-blocking retirement; collection releases them
+only at a terminal state. This preserves safety without blocking destructors
+and is the rule in [ADR-0004](adr/0004-accepted-unknown-quarantine.md).
 
 ## Readback, diagnostics, and evidence
 
@@ -304,6 +305,15 @@ objects. Before issuing WebGL calls it validates the shared compiled plan as
 one black-clear/store raster pass with exactly one presentable target and the
 fixed per-draw vertex/index/uniform usage topology. It never exposes WebGL
 objects to RenderGraph or renderer code.
+
+The WebGL2 capability factory is deliberately stricter than browser API
+availability. It compiles only the retained default-framebuffer raster/present
+graph before a context is created. Compute, storage buffers, storage textures,
+sampling, copies, and graph transient creation are unsupported by that graph
+adapter and receive structured `UnsupportedCapability` diagnostics with no
+context, resource, recording, or submission side effect. A separate closed
+resource-floor browser fixture is not permission to lower arbitrary WebGL2
+resource graphs, and there is no compute/storage emulation.
 
 At most three fences may remain pending. A zero-timeout `clientWaitSync` either
 retires the oldest fence or reports normal backpressure; visibility, resize,
@@ -321,6 +331,17 @@ Only the closed `rgba8unorm` and `bgra8unorm` canvas formats are accepted; none
 of these browser objects enter RenderGraph, renderer, or JavaScript bridge
 contracts.
 
+WebGPU additionally has a production closed resource-floor path. It owns
+opaque `WebGpuResourceKey` identities and a private registry of resources for
+the fixed recipe: uploads/copies, vertex/index/uniform/storage buffers,
+sampled RGBA8 texture, RGBA8 color attachment, Depth32Float attachment, and
+a writable RGBA8 storage texture. The registry records a device generation and
+per-key lease; a ticket retains every used lease through terminal completion.
+Loss/recovery retires the old generation from lookup without destroying objects
+still retained by a ticket, while explicit per-key retirement creates a fresh
+physical object only for that key. This is not a public browser mapping,
+resource-builder, shader, or pipeline API.
+
 A configured canvas epoch changes on nonzero reconfiguration but does not end
 the device generation or retire submitted work. Each accepted frame carries a
 generation-tagged completion ticket and its private resources until
@@ -334,6 +355,27 @@ than promised as a general recovery contract. Normal disposal is an idempotent a
 lifecycle tokens prevent in-flight recovery from reinstalling objects after
 disposal. Error scopes, uncaptured errors, device loss, rejected Promises, and
 partial creation use structured diagnostics and symmetric observer cleanup.
+
+## Fixed resource capability matrix
+
+The resource floor is a set of closed paths, not a statement that all APIs
+share one arbitrary resource interface. The common fixed resource floor is
+available on DX12, Vulkan, WebGPU, and WebGL2. Modern compute/storage paths are
+available only where listed below; an omitted cell is a structured fail-closed
+result rather than a fallback.
+
+| Fixed semantic path | DX12 | Vulkan | WebGPU | WebGL2 |
+| --- | --- | --- | --- | --- |
+| Common fixed resource floor | Yes | Yes | Yes | Yes |
+| Compute and storage buffers | Yes | Yes | Yes | No |
+| Writable RGBA8 storage texture | Yes | Yes | Yes | No |
+| Readable RGBA8 storage texture | No (driver fact fails closed) | Yes | Not promised | No |
+
+The native read path is separately capability-gated: DX12 must not advertise
+storage-texture read merely because another backend supports it. Likewise,
+WebGPU's present closed resource recipe does not promise storage-texture read.
+This asymmetric matrix is intentional and is surfaced through the portable
+capability contract rather than hidden behind emulation.
 
 Readback is doc-hidden `test-support` for conformance fixtures, never a public
 mapping API. It consumes an exported resource's reported outgoing state and

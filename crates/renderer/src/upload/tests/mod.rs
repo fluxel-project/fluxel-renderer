@@ -2,7 +2,7 @@
 
 use super::indexed::SnapshotPublication;
 use super::normal::*;
-use super::shared::{RetainedUploadState, SnapshotUseGate};
+use super::shared::{RetainedUploadState, SnapshotUseGate, completion_requires_retention};
 use super::textured::*;
 use super::*;
 use std::sync::Arc;
@@ -160,6 +160,11 @@ fn publication_policy_represents_partial_acceptance_without_ready_output() {
 #[test]
 fn generation_use_gate_allows_concurrent_immutable_readers_and_poison_is_monotonic() {
     gate::generation_use_gate_allows_concurrent_immutable_readers_and_poison_is_monotonic();
+}
+
+#[test]
+fn unknown_completion_keeps_the_reservation_until_a_terminal_observation() {
+    gate::unknown_completion_keeps_the_reservation_until_a_terminal_observation();
 }
 
 #[cfg(windows)]

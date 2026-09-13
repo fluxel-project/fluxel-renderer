@@ -28,7 +28,43 @@ pub(crate) fn create_compute_pipeline(
         debug_source: None,
     };
     let texture_pack = source.contains("texture_2d<");
-    let layout_entries = if texture_pack {
+    let storage_write = source.contains("texture_storage_2d<rgba8unorm, write>");
+    let storage_read = source.contains("texture_storage_2d<rgba8unorm, read>");
+    let layout_entries = if storage_write {
+        vec![wgt::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgt::ShaderStages::COMPUTE,
+            ty: wgt::BindingType::StorageTexture {
+                access: wgt::StorageTextureAccess::WriteOnly,
+                format: wgt::TextureFormat::Rgba8Unorm,
+                view_dimension: wgt::TextureViewDimension::D2,
+            },
+            count: None,
+        }]
+    } else if storage_read {
+        vec![
+            wgt::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgt::ShaderStages::COMPUTE,
+                ty: wgt::BindingType::StorageTexture {
+                    access: wgt::StorageTextureAccess::ReadOnly,
+                    format: wgt::TextureFormat::Rgba8Unorm,
+                    view_dimension: wgt::TextureViewDimension::D2,
+                },
+                count: None,
+            },
+            wgt::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgt::ShaderStages::COMPUTE,
+                ty: wgt::BindingType::Buffer {
+                    ty: wgt::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ]
+    } else if texture_pack {
         vec![
             wgt::BindGroupLayoutEntry {
                 binding: 0,

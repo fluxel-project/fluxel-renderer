@@ -142,6 +142,16 @@ resources to them. Exports name roots and carry an outgoing-state contract for
 the next graph or external consumer. More detail is in the
 [RenderGraph design](design-rendergraph.md).
 
+An import binding identifies a provider-selected physical object and generation,
+its actual incoming state, allowed usage, and a completion-safe lease. The
+executor checks these facts; an export returns its actual outgoing state rather
+than a guessed default. Compatible compiled graphs may privately reuse a
+completed transient allocation, but only for exact whole-resource state
+carry-over. Reuse is segregated by device and compiled-graph generation; graph
+or device invalidation prevents a new checkout while pending or unknown work
+continues to retain its old-generation lease. It is not public aliasing or a
+caller-visible cache. See [ADR-0009](adr/0009-resource-floor-and-reuse-safety.md).
+
 ### RHI resolution, execution, and completion
 
 RHI resolves plan resources against opaque native resources, verifies device
@@ -156,7 +166,8 @@ convenient state. Submission is not treated as completion. A known rejection,
 accepted-but-unknown submission, successful completion, and terminal failure
 are distinct states with different ownership consequences. Unknown accepted
 work is quarantined rather than releasing objects or publishing guessed state;
-see [ADR-0004](adr/0004-accepted-unknown-quarantine.md).
+the same conservative rule applies when a completion query itself is `Unknown`.
+See [ADR-0004](adr/0004-accepted-unknown-quarantine.md).
 
 The serial lowering is a correctness strategy, not a claim that graph passes
 are tied to one encoder, command buffer, or queue. Multi-queue scheduling,
@@ -277,10 +288,17 @@ policy; RHI only guards native image availability and completion-driven teardown
 Non-Windows native requests fail explicitly rather than silently emulating a
 backend. Lost native surface/device recovery and a general cross-platform
 surface API remain absent. The Stage 2.1 WebGL2 and Stage 2.2 WebGPU paths are
-closed fixed-scene adapters, not a general web renderer; DOM lifecycle and
-RAF ownership remain in `fluxel-jsbridge`. WebGPU separately owns a private
-device-generation/canvas-epoch state machine with asynchronous recovery and
-terminal disposal; that browser-only contract does not broaden native Surface.
+closed browser adapters, not a general web renderer; DOM lifecycle and RAF
+ownership remain in `fluxel-jsbridge`. The common fixed resource floor is
+available on DX12, Vulkan, WebGPU, and WebGL2. Compute/storage-buffer and
+writable storage-texture recipes are present on DX12, Vulkan, and WebGPU;
+readable storage texture is currently Vulkan-only. DX12 reports its observed
+read limitation and fails closed; WebGPU read is not promised. WebGL2 rejects
+compute and every storage operation with structured capability evidence before
+context/resource side effects, with no emulation. WebGPU separately owns a
+private device-generation/canvas-epoch state machine, opaque per-key resource
+registry, ticket-held leases, asynchronous recovery, and terminal disposal;
+that browser-only contract does not broaden native Surface.
 
 Windows MSVC is the primary Windows development/native test environment. Linux
 must be tested natively (for example in WSL2/Ubuntu), because it exercises

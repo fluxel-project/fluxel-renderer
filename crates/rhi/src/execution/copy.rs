@@ -16,7 +16,12 @@ pub(in crate::execution) fn copy_capabilities() -> DeviceCapabilities {
         .transitions(TransitionCapabilities::GraphManagedExplicit)
         .synchronization(SynchronizationCapabilities::SingleQueueOrdering)
         .timestamps(TimestampCapabilities::Unsupported)
-        .transient_resources(TransientResourceCapabilities::new(false, false, false))
+        // Native DeviceOnly resources have stable physical identities and their
+        // leases remain owned by the submitted command buffer.  They may
+        // therefore be reused by the executor only after completion.  We do
+        // not expose in-frame aliasing: the fixed native recorders do not have
+        // an aliasing-barrier contract.
+        .transient_resources(TransientResourceCapabilities::new(true, false, false))
         .limits(DeviceLimits::new(0, 256))
         .buffers(BufferCapabilities::new(false, false, false))
         .texture_format(
@@ -377,10 +382,10 @@ impl ExecutionBackend for CopyBackend {
             .map_err(NativeExecutionError::SubmitRejected)
     }
     fn completion_status(&self, completion: &Self::Completion) -> CompletionStatus {
-        // ExecutionBackend requires a total query. A native query error cannot
-        // prove progress, so expose the conservative terminal device failure.
-        crate::imp::completion_status(&completion.0)
-            .unwrap_or(CompletionStatus::Failed(CompletionFailure::DeviceLost))
+        // ExecutionBackend requires a total query. A native observation error
+        // proves neither completion nor terminal failure, so keep the work
+        // quarantined as Unknown.
+        crate::imp::completion_status(&completion.0).unwrap_or(CompletionStatus::Unknown)
     }
     fn retire(&mut self, completion: Self::Completion, leases: Vec<Self::Lease>) {
         self.retired.push(Retired { completion, leases });
@@ -393,8 +398,9 @@ impl ExecutionBackend for CopyBackend {
         self.retired.retain(|entry| {
             let _ = entry.leases.len();
             match crate::imp::completion_status(&entry.completion.0) {
-                Ok(CompletionStatus::Pending) => true,
-                Ok(_) => false,
+                Ok(CompletionStatus::Pending | CompletionStatus::Unknown) => true,
+                Ok(CompletionStatus::Complete | CompletionStatus::Failed(_)) => false,
+                Ok(_) => true,
                 Err(error) => {
                     query_error.get_or_insert(error);
                     true

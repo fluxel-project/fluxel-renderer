@@ -138,6 +138,13 @@ the executor first proves that every retained ordinary import has a frame bindin
 these checks reject incomplete frame input without provider side effects and before
 an encoder is opened.
 
+Provider identity is physical, not a descriptive label: a recreated object has
+a new generation even when it has the same descriptor and contents contract.
+The provider owns persistent-object lifetime and supplies a lease for the
+entire execution. The executor preserves the provider's actual incoming state;
+an export similarly reports its actual outgoing state to the next consumer.
+State is never reset merely because a resource crossed a frame boundary.
+
 ## Compilation
 
 Compilation is deterministic planning, not execution:
@@ -215,6 +222,25 @@ hardware queues. Multi-queue scheduling, parallel recording, aliasing,
 recording caches, and GPU-performance claims remain future lowering choices
 that must preserve the portable plan and be justified by measurement.
 
+### Private transient reuse
+
+The executor may retain completed transient allocations for a compatible later
+instantiation. This is private allocation policy, not a physical-alias model or
+a caller-visible resource cache. A reusable slot is segregated by device
+identity, compiled-graph generation, and logical resource identity. It is
+eligible only where the executor can carry one exact whole-resource state from
+the prior execution. The first transition of a reused resource begins at that
+remembered state, not at fabricated `Undefined`.
+
+Resources with partial or mixed subresource state do not enter this pool until
+the execution contract can represent their complete physical state history.
+Graph or device invalidation removes a slot from future checkout but marks it
+for retirement; pending and accepted-unknown work remains quarantined with its
+lease. Thus invalidating a graph/device generation cannot free old physical
+resources before their submission reaches a known terminal outcome. `TestRhi`
+persists physical state for this protocol check, but does not establish native
+GPU correctness.
+
 `ExecutionBackend` is the narrow backend SPI. It owns transient allocation,
 encoder/pass lifecycle, planned transition lowering, opaque pipeline/binding
 selection, draw/dispatch/copy commands, submit, completion polling, and
@@ -227,12 +253,14 @@ pipeline API. The choice to keep proven combinations closed is recorded in
 ### Completion, leases, re-entrancy, and failure
 
 Submission acceptance and completion are distinct. `CompletionStatus` is
-`Pending`, `Complete`, or a structured terminal `Failed` state. A backend may
-return submit `Err` only when it knows no work was accepted. If acceptance is
-unknown, it must return a completion that later reaches terminal failure, so
-every referenced lease remains retained or quarantined safely. This rule is
-essential for native lifetime safety; its rationale is in
-[ADR-0004](adr/0004-accepted-unknown-quarantine.md).
+`Pending`, `Unknown`, `Complete`, or a structured terminal `Failed` state. A
+backend may return submit `Err` only when it knows no work was accepted. An
+`Unknown` status means acceptance or completion cannot yet be proved; it is
+not terminal and retains the same leases as `Pending`. Every future/unrecognized
+nonterminal status is treated conservatively until retirement is safe. This
+rule is essential for native lifetime safety; its rationale is in
+[ADR-0004](adr/0004-accepted-unknown-quarantine.md) and the reuse implications
+are recorded in [ADR-0009](adr/0009-resource-floor-and-reuse-safety.md).
 
 `FrameSubmission` owns executor-held leases until terminal completion. Dropping
 a pending submission is non-blocking: it moves its completion and leases to an

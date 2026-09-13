@@ -30,10 +30,12 @@ pub(crate) enum PhysicalResource<B: ExecutionBackend> {
     Texture {
         physical: B::Texture,
         descriptor: crate::rhi::TextureDesc,
+        initial_state: crate::rhi::ResourceAccessState,
     },
     Buffer {
         physical: B::Buffer,
         descriptor: crate::rhi::BufferDesc,
+        initial_state: crate::rhi::ResourceAccessState,
     },
 }
 

@@ -209,3 +209,4 @@ impl RenderObjectProvider<TestRhi> for WrongBindingProvider {
 
 mod completion_and_provider;
 mod portable;
+mod transient_reuse;

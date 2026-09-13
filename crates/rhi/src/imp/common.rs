@@ -358,6 +358,17 @@ pub(crate) enum NativeComputeBindingsInner {
     Dx12(wgpu_hal::dx12::BindGroup),
     #[cfg(feature = "vulkan")]
     Vulkan(wgpu_hal::vulkan::BindGroup),
+    /// Closed storage-texture groups retain their sole view until group teardown.
+    #[cfg(feature = "dx12")]
+    Dx12Texture {
+        group: wgpu_hal::dx12::BindGroup,
+        view: wgpu_hal::dx12::TextureView,
+    },
+    #[cfg(feature = "vulkan")]
+    VulkanTexture {
+        group: wgpu_hal::vulkan::BindGroup,
+        view: wgpu_hal::vulkan::TextureView,
+    },
 }
 
 pub(crate) struct CopyCommandBuffer {

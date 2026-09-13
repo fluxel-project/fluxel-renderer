@@ -6,6 +6,8 @@ use super::super::*;
 pub enum ComputeCreateError {
     /// The device cannot support the fixed shader's declared workgroup.
     UnsupportedComputeLimits,
+    /// The device did not enable the exact RGBA8 storage access required by this recipe.
+    UnsupportedStorageTexture,
     /// The pipeline, buffer, or binding operation crossed device identities.
     ForeignDevice,
     /// The requested storage-buffer view is empty, unaligned, overflowing, or out of bounds.
@@ -29,6 +31,9 @@ impl fmt::Display for ComputeCreateError {
         match self {
             Self::UnsupportedComputeLimits => {
                 f.write_str("device does not support this fixed compute workgroup")
+            }
+            Self::UnsupportedStorageTexture => {
+                f.write_str("device does not support the fixed RGBA8 storage-texture recipe")
             }
             Self::ForeignDevice => f.write_str("compute objects belong to different devices"),
             Self::InvalidBindingRange => f.write_str("invalid compute storage-buffer range"),
@@ -81,6 +86,10 @@ pub enum ComputeKernel {
     WrappingMultiply,
     /// Packs every texel of one `Rgba8Unorm` texture into row-major `u32`s.
     TexturePackRgba8,
+    /// Stores a fixed RGBA8 value into every texel of a storage texture.
+    TextureStoreRgba8,
+    /// Loads RGBA8 storage texels and packs them into a RW storage buffer.
+    TextureLoadRgba8,
 }
 
 /// Portable identity of one fixed compute artifact.
@@ -107,6 +116,8 @@ impl ComputeKernel {
             Self::WrappingAdd => "wrapping_add",
             Self::WrappingMultiply => "wrapping_multiply",
             Self::TexturePackRgba8 => "pack_rgba8",
+            Self::TextureStoreRgba8 => "store_rgba8",
+            Self::TextureLoadRgba8 => "load_rgba8",
         }
     }
 
@@ -114,7 +125,7 @@ impl ComputeKernel {
     pub const fn workgroup_size(self) -> [u32; 3] {
         match self {
             Self::WrappingAdd | Self::WrappingMultiply => [64, 1, 1],
-            Self::TexturePackRgba8 => [8, 8, 1],
+            Self::TexturePackRgba8 | Self::TextureStoreRgba8 | Self::TextureLoadRgba8 => [8, 8, 1],
         }
     }
 
@@ -141,6 +152,8 @@ impl ComputeKernel {
         match self {
             Self::WrappingAdd | Self::WrappingMultiply => 1,
             Self::TexturePackRgba8 => 2,
+            Self::TextureStoreRgba8 => 3,
+            Self::TextureLoadRgba8 => 4,
         }
     }
 
@@ -169,6 +182,29 @@ impl ComputeKernel {
              let g = u32(round(pixel.g * 255.0));\n\
              let b = u32(round(pixel.b * 255.0));\n\
              let a = u32(round(pixel.a * 255.0));\n\
+             destination[id.y * dimensions.x + id.x] = r | (g << 8u) | (b << 16u) | (a << 24u);\n\
+         }"
+            }
+            Self::TextureStoreRgba8 => {
+                "@group(0) @binding(0) var output_image: texture_storage_2d<rgba8unorm, write>;\n\
+         @compute @workgroup_size(8, 8, 1)\n\
+         fn store_rgba8(@builtin(global_invocation_id) id: vec3<u32>) {\n\
+             let dimensions = textureDimensions(output_image);\n\
+             if (id.x < dimensions.x && id.y < dimensions.y) {\n\
+                 textureStore(output_image, vec2<i32>(id.xy), vec4<f32>(0.25, 0.5, 0.75, 1.0));\n\
+             }\n\
+         }"
+            }
+            Self::TextureLoadRgba8 => {
+                "@group(0) @binding(0) var source: texture_storage_2d<rgba8unorm, read>;\n\
+         @group(0) @binding(1) var<storage, read_write> destination: array<u32>;\n\
+         @compute @workgroup_size(8, 8, 1)\n\
+         fn load_rgba8(@builtin(global_invocation_id) id: vec3<u32>) {\n\
+             let dimensions = textureDimensions(source);\n\
+             if (id.x >= dimensions.x || id.y >= dimensions.y) { return; }\n\
+             let pixel = textureLoad(source, vec2<i32>(id.xy));\n\
+             let r = u32(round(pixel.r * 255.0)); let g = u32(round(pixel.g * 255.0));\n\
+             let b = u32(round(pixel.b * 255.0)); let a = u32(round(pixel.a * 255.0));\n\
              destination[id.y * dimensions.x + id.x] = r | (g << 8u) | (b << 16u) | (a << 24u);\n\
          }"
             }
@@ -204,16 +240,20 @@ pub struct ComputePipelineLease(pub(in crate::resource) Arc<ComputePipelineShare
 pub(in crate::resource) struct ComputeBindingsShared {
     pub(in crate::resource) _native: crate::imp::NativeComputeBindings,
     pub(in crate::resource) pipeline: ComputePipeline,
-    pub(in crate::resource) _buffer: BufferLease,
+    pub(in crate::resource) _buffer: Option<BufferLease>,
+    pub(in crate::resource) _texture: Option<TextureLease>,
     pub(in crate::resource) offset: u64,
     pub(in crate::resource) size: u64,
     pub(in crate::resource) device: fluxel_rendergraph::DeviceIdentity,
 }
 
-/// An opaque binding object for exactly one in-place RW storage buffer.
+/// An opaque binding object for one closed fixed-compute recipe.
+///
+/// It retains the recipe's pipeline and exact buffer/texture inputs, without
+/// exposing a bind-group layout or arbitrary shader resource interface.
 #[derive(Clone)]
 pub struct ComputeBindings(pub(in crate::resource) Arc<ComputeBindingsShared>);
 
-/// A cloneable strong lease for a binding object, its pipeline, and its buffer.
+/// A cloneable strong lease for a binding object and every resource it retains.
 #[derive(Clone)]
 pub struct ComputeBindingsLease(pub(in crate::resource) Arc<ComputeBindingsShared>);

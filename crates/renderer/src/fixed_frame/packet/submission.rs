@@ -19,7 +19,7 @@ use crate::fixed_frame::{
 };
 
 use super::*;
-use crate::upload::{SnapshotDrawReservation, SnapshotUseError};
+use crate::upload::{SnapshotDrawReservation, SnapshotUseError, completion_requires_retention};
 #[cfg(windows)]
 use fluxel_rhi::presentation::AcquiredSurfaceFrame;
 #[cfg(windows)]
@@ -337,7 +337,7 @@ impl RenderPacketSubmission {
         pending: PendingBufferUpload,
     ) -> RenderPacketStatus {
         match pending.status() {
-            Ok(CompletionStatus::Pending) => {
+            Ok(status) if completion_requires_retention(status) => {
                 self.phase = PacketPhase::UniformUploading {
                     draw_index,
                     pending,
@@ -351,10 +351,11 @@ impl RenderPacketSubmission {
                     self.start_next_uniform_or_raster(draw_index + 1)
                 }
                 Err(incomplete) => {
-                    self.finish_pre_raster(RenderPacketFailure::UniformObservation {
+                    self.phase = PacketPhase::UniformUploading {
                         draw_index,
-                        cause: FixedFrameUniformObservationError::Finalize(incomplete.status()),
-                    })
+                        pending: incomplete.into_pending(),
+                    };
+                    RenderPacketStatus::Pending
                 }
             },
             Ok(CompletionStatus::Failed(cause)) => {
@@ -462,7 +463,7 @@ impl RenderPacketSubmission {
             Err(error) => self.finish_accepted(RenderPacketFailure::RasterObservation {
                 cause: FixedFrameRasterObservationError::Execution(execution_error(error)),
             }),
-            Ok(CompletionStatus::Pending) => {
+            Ok(status) if completion_requires_retention(status) => {
                 self.phase = PacketPhase::RasterAccepted(frame);
                 RenderPacketStatus::Pending
             }

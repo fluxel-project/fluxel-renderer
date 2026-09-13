@@ -181,6 +181,23 @@ pub(crate) fn create_compute_bindings(
 ) -> Result<NativeComputeBindings, String> {
     Err("native compute is only supported on Windows".into())
 }
+pub(crate) fn create_texture_store_bindings(
+    _: &Arc<OpenedDevice>,
+    _: &NativeComputePipeline,
+    _: &OwnedTexture,
+) -> Result<NativeComputeBindings, String> {
+    Err("native compute is only supported on Windows".into())
+}
+pub(crate) fn create_texture_load_bindings(
+    _: &Arc<OpenedDevice>,
+    _: &NativeComputePipeline,
+    _: &OwnedTexture,
+    _: &OwnedBuffer,
+    _: u64,
+    _: u64,
+) -> Result<NativeComputeBindings, String> {
+    Err("native compute is only supported on Windows".into())
+}
 pub(crate) fn create_texture_pack_bindings(
     _: &Arc<OpenedDevice>,
     _: &NativeComputePipeline,

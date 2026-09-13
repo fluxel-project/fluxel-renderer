@@ -31,6 +31,12 @@ impl DeviceIdentity {
 pub enum CompletionStatus {
     /// The submission has not completed.
     Pending,
+    /// The backend cannot presently determine whether the submission completed.
+    ///
+    /// This is deliberately distinct from a terminal failure. Callers must
+    /// retain every lease and must not recycle any physical resource while the
+    /// status is unknown.
+    Unknown,
     /// The submission completed successfully.
     Complete,
     /// The accepted submission reached a terminal failure.

@@ -21,6 +21,27 @@ pub(crate) fn generation_use_gate_allows_concurrent_immutable_readers_and_poison
     assert_eq!(gate.reserve().unwrap_err(), SnapshotUseError::Poisoned);
 }
 
+pub(crate) fn unknown_completion_keeps_the_reservation_until_a_terminal_observation() {
+    let gate = Arc::new(SnapshotUseGate::new());
+    let mut reservation = gate.reserve().expect("reserve immutable generation");
+
+    // An unknown completion is retryable: the operation must not release the
+    // accepted generation merely because the backend cannot observe it yet.
+    let status = fluxel_rendergraph::CompletionStatus::Unknown;
+    if !completion_requires_retention(status) {
+        reservation.release_complete();
+    }
+    assert_eq!(gate.active_readers(), 1, "unknown retains the lease");
+
+    // Only a terminal successful observation advances the lifecycle and
+    // releases the immutable-generation lease.
+    assert!(!completion_requires_retention(
+        fluxel_rendergraph::CompletionStatus::Complete
+    ));
+    reservation.release_complete();
+    assert_eq!(gate.active_readers(), 0, "complete releases the lease");
+}
+
 #[cfg(windows)]
 pub(crate) fn u05_textured_three_upload_fault_contract_dx12() {
     run_textured_three_upload_fault_contract(fluxel_rhi::Backend::Dx12);

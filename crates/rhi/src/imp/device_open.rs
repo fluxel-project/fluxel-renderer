@@ -35,11 +35,19 @@ fn open_dx12(options: DeviceOptions) -> Result<OpenedDevice, OpenError> {
     let hardware = hardware(Backend::Dx12, &exposed.info);
     let rgba8_unorm_filterable = rgba8_unorm_filterable(&exposed.adapter);
     let rgba8_unorm_srgb_filterable = rgba8_unorm_srgb_filterable(&exposed.adapter);
+    let rgba8_unorm_storage_read = rgba8_unorm_storage_read(&exposed.adapter);
+    let rgba8_unorm_storage_write = rgba8_unorm_storage_write(&exposed.adapter);
+    // The adapter reports the format feature, but S01's real D3D12 witness
+    // observes zeroes from the typed RGBA8 UAV load. Do not request or expose
+    // a feature the fixed RHI recipe cannot prove end-to-end.
+    let enabled_features = wgt::Features::empty();
     let capabilities = capabilities(
-        exposed.features,
+        enabled_features,
         &exposed.capabilities,
         rgba8_unorm_filterable,
         rgba8_unorm_srgb_filterable,
+        rgba8_unorm_storage_read,
+        rgba8_unorm_storage_write,
     );
     let requested_limits = required_limits(Backend::Dx12, &exposed.capabilities)?;
     let adapter = exposed.adapter;
@@ -47,7 +55,7 @@ fn open_dx12(options: DeviceOptions) -> Result<OpenedDevice, OpenError> {
     // exposed adapter before HAL creates a device and its matching queue.
     let wgpu_hal::OpenDevice { device, queue } = unsafe {
         adapter.open(
-            wgt::Features::empty(),
+            enabled_features,
             &requested_limits,
             &wgt::MemoryHints::default(),
         )
@@ -105,11 +113,16 @@ fn open_vulkan(options: DeviceOptions) -> Result<OpenedDevice, OpenError> {
     let hardware = hardware(Backend::Vulkan, &exposed.info);
     let rgba8_unorm_filterable = rgba8_unorm_filterable(&exposed.adapter);
     let rgba8_unorm_srgb_filterable = rgba8_unorm_srgb_filterable(&exposed.adapter);
+    let rgba8_unorm_storage_read = rgba8_unorm_storage_read(&exposed.adapter);
+    let rgba8_unorm_storage_write = rgba8_unorm_storage_write(&exposed.adapter);
+    let enabled_features = storage_texture_features(exposed.features, rgba8_unorm_storage_read);
     let capabilities = capabilities(
-        exposed.features,
+        enabled_features,
         &exposed.capabilities,
         rgba8_unorm_filterable,
         rgba8_unorm_srgb_filterable,
+        rgba8_unorm_storage_read,
+        rgba8_unorm_storage_write,
     );
     let requested_limits = required_limits(Backend::Vulkan, &exposed.capabilities)?;
     let adapter = exposed.adapter;
@@ -117,7 +130,7 @@ fn open_vulkan(options: DeviceOptions) -> Result<OpenedDevice, OpenError> {
     // exposed adapter before HAL creates a device and its matching queue.
     let wgpu_hal::OpenDevice { device, queue } = unsafe {
         adapter.open(
-            wgt::Features::empty(),
+            enabled_features,
             &requested_limits,
             &wgt::MemoryHints::default(),
         )
@@ -248,15 +261,46 @@ pub(crate) fn rgba8_unorm_srgb_filterable<A: wgpu_hal::Adapter>(adapter: &A) -> 
         .contains(wgpu_hal::TextureFormatCapabilities::SAMPLED_LINEAR)
 }
 
+pub(crate) fn rgba8_unorm_storage_read<A: wgpu_hal::Adapter>(adapter: &A) -> bool {
+    // SAFETY: this is the same read-only adapter-format query used for
+    // filterability; its result is retained as an unmodified native fact.
+    unsafe { adapter.texture_format_capabilities(wgt::TextureFormat::Rgba8Unorm) }
+        .contains(wgpu_hal::TextureFormatCapabilities::STORAGE_READ_ONLY)
+}
+
+pub(crate) fn rgba8_unorm_storage_write<A: wgpu_hal::Adapter>(adapter: &A) -> bool {
+    // SAFETY: same side-effect-free adapter query as the read capability.
+    unsafe { adapter.texture_format_capabilities(wgt::TextureFormat::Rgba8Unorm) }
+        .contains(wgpu_hal::TextureFormatCapabilities::STORAGE_WRITE_ONLY)
+}
+
+pub(crate) fn storage_texture_features(
+    available: wgt::Features,
+    rgba8_read: bool,
+) -> wgt::Features {
+    let read_feature = wgt::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
+    if rgba8_read && available.contains(read_feature) {
+        read_feature
+    } else {
+        wgt::Features::empty()
+    }
+}
+
 pub(crate) fn capabilities(
-    _: wgt::Features,
+    enabled_features: wgt::Features,
     capabilities: &wgpu_hal::Capabilities,
     rgba8_unorm_filterable: bool,
     rgba8_unorm_srgb_filterable: bool,
+    rgba8_unorm_storage_read: bool,
+    rgba8_unorm_storage_write: bool,
 ) -> HardwareCapabilities {
     HardwareCapabilities {
         rgba8_unorm_filterable,
         rgba8_unorm_srgb_filterable,
+        rgba8_unorm_storage_read,
+        rgba8_unorm_storage_write,
+        rgba8_unorm_storage_read_enabled: rgba8_unorm_storage_read
+            && enabled_features.contains(wgt::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES),
         max_texture_dimension_2d: capabilities.limits.max_texture_dimension_2d,
         max_bind_groups: capabilities.limits.max_bind_groups,
         min_uniform_buffer_offset_alignment: capabilities

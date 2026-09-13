@@ -12,6 +12,25 @@ pub struct ComputeBackend {
     device: Device,
     capabilities: DeviceCapabilities,
     retired: Vec<Retired>,
+    #[cfg(test)]
+    transient_observations: TestTransientObservations,
+}
+
+/// Test-only evidence emitted by native transient allocation and barrier
+/// recording.  This deliberately stays crate-private: it is not an RHI API.
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub(in crate::execution) struct TestTransientObservations {
+    pub(in crate::execution) allocations: Vec<fluxel_rendergraph::PhysicalResourceIdentity>,
+    pub(in crate::execution) transitions: Vec<TestTransientTransition>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::execution) struct TestTransientTransition {
+    pub(in crate::execution) identity: fluxel_rendergraph::PhysicalResourceIdentity,
+    pub(in crate::execution) before: ResourceAccessState,
+    pub(in crate::execution) after: ResourceAccessState,
 }
 
 impl ComputeBackend {
@@ -21,6 +40,8 @@ impl ComputeBackend {
             capabilities: compute_capabilities(&device),
             device,
             retired: Vec::new(),
+            #[cfg(test)]
+            transient_observations: TestTransientObservations::default(),
         }
     }
 
@@ -47,7 +68,16 @@ fn compute_capabilities(device: &Device) -> DeviceCapabilities {
             .all(|(native, required)| native >= required),
         "Device::open validates the portable dispatch baseline"
     );
-    compute_capabilities_from_limit(portable_limit)
+    let mut capabilities = compute_capabilities_from_limit(portable_limit);
+    if let Some(format) = capabilities
+        .texture_formats
+        .iter_mut()
+        .find(|format| format.format == TextureFormat::Rgba8Unorm)
+    {
+        format.storage_read = device.capabilities().rgba8_unorm_storage_read_enabled;
+        format.storage_write = device.capabilities().rgba8_unorm_storage_write;
+    }
+    capabilities
 }
 
 fn compute_capabilities_from_limit(maximum: [u32; 3]) -> DeviceCapabilities {
@@ -63,7 +93,10 @@ fn compute_capabilities_from_limit(maximum: [u32; 3]) -> DeviceCapabilities {
         .transitions(TransitionCapabilities::GraphManagedExplicit)
         .synchronization(SynchronizationCapabilities::SingleQueueOrdering)
         .timestamps(TimestampCapabilities::Unsupported)
-        .transient_resources(TransientResourceCapabilities::new(false, false, false))
+        // See CopyBackend: these are owned native DeviceOnly allocations, so
+        // completion-gated cross-frame reuse is sound.  Alias barriers are
+        // deliberately not part of this fixed compute profile.
+        .transient_resources(TransientResourceCapabilities::new(true, false, false))
         .limits(DeviceLimits::new(0, 256).with_max_compute_workgroups_per_dimension(maximum))
         .buffers(BufferCapabilities::new(true, true, false))
         .texture_format(
@@ -103,6 +136,10 @@ impl ExecutionBackend for ComputeBackend {
             usage,
             memory: MemoryPolicy::DeviceOnly,
         })?;
+        #[cfg(test)]
+        self.transient_observations
+            .allocations
+            .push(texture.identity());
         Ok(BoundTexture {
             device: self.device.identity(),
             identity: texture.identity(),
@@ -123,6 +160,10 @@ impl ExecutionBackend for ComputeBackend {
             usage,
             memory: MemoryPolicy::DeviceOnly,
         })?;
+        #[cfg(test)]
+        self.transient_observations
+            .allocations
+            .push(buffer.identity());
         Ok(BoundBuffer {
             device: self.device.identity(),
             identity: buffer.identity(),
@@ -178,8 +219,20 @@ impl ExecutionBackend for ComputeBackend {
         before: ResourceAccessState,
         after: ResourceAccessState,
     ) -> Result<(), Self::Error> {
-        self.copy()
-            .transition_texture(encoder, texture, range, before, after)
+        let result = self
+            .copy()
+            .transition_texture(encoder, texture, range, before, after);
+        #[cfg(test)]
+        if result.is_ok() {
+            self.transient_observations
+                .transitions
+                .push(TestTransientTransition {
+                    identity: texture.identity(),
+                    before,
+                    after,
+                });
+        }
+        result
     }
     fn transition_buffer(
         &mut self,
@@ -189,8 +242,20 @@ impl ExecutionBackend for ComputeBackend {
         before: ResourceAccessState,
         after: ResourceAccessState,
     ) -> Result<(), Self::Error> {
-        self.copy()
-            .transition_buffer(encoder, buffer, range, before, after)
+        let result = self
+            .copy()
+            .transition_buffer(encoder, buffer, range, before, after);
+        #[cfg(test)]
+        if result.is_ok() {
+            self.transient_observations
+                .transitions
+                .push(TestTransientTransition {
+                    identity: buffer.identity(),
+                    before,
+                    after,
+                });
+        }
+        result
     }
     fn begin_raster(
         &mut self,
@@ -372,9 +437,8 @@ impl ExecutionBackend for ComputeBackend {
     }
     fn completion_status(&self, completion: &NativeCompletion) -> CompletionStatus {
         // ExecutionBackend requires a total query. A native query error cannot
-        // prove progress, so expose the conservative terminal device failure.
-        crate::imp::completion_status(&completion.0)
-            .unwrap_or(CompletionStatus::Failed(CompletionFailure::DeviceLost))
+        // prove progress, so it remains non-terminal and quarantined.
+        crate::imp::completion_status(&completion.0).unwrap_or(CompletionStatus::Unknown)
     }
     fn retire(&mut self, completion: NativeCompletion, leases: Vec<ResourceLease>) {
         self.retired.push(Retired { completion, leases });
@@ -386,7 +450,7 @@ impl ExecutionBackend for ComputeBackend {
         // the entry and its leases quarantined instead of freeing live handles.
         self.retired.retain(
             |entry| match crate::imp::completion_status(&entry.completion.0) {
-                Ok(CompletionStatus::Pending) => true,
+                Ok(CompletionStatus::Pending | CompletionStatus::Unknown) => true,
                 Ok(_) => false,
                 Err(error) => {
                     query_error.get_or_insert(error);
@@ -409,6 +473,11 @@ pub(in crate::execution) fn valid_compute_dispatch(groups: [u32; 3], maximum: [u
 }
 
 impl ComputeBackend {
+    #[cfg(test)]
+    pub(in crate::execution) fn test_transient_observations(&self) -> TestTransientObservations {
+        self.transient_observations.clone()
+    }
+
     pub(in crate::execution) fn copy(&self) -> CopyBackend {
         CopyBackend {
             device: self.device.clone(),

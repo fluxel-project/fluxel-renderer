@@ -82,6 +82,7 @@ pub(crate) fn compute_binding_error_kind(
         ComputeCreateError::ForeignDevice
         | ComputeCreateError::InvalidBindingRange
         | ComputeCreateError::StorageUsageRequired
+        | ComputeCreateError::UnsupportedStorageTexture
         | ComputeCreateError::BindingRecipeMismatch
         | ComputeCreateError::UnsupportedComputeLimits => {
             fluxel_rendergraph::RecordingErrorKind::IncompatibleBindingRecipe
@@ -144,6 +145,101 @@ impl fluxel_rendergraph::RenderObjectProvider<ComputeBackend> for ComputeObjectP
         fluxel_rendergraph::BoundBindings<ComputeBindings, ResourceLease>,
         fluxel_rendergraph::RecordingError,
     > {
+        let (_, pipeline) = self.bindings.get(&id).ok_or_else(|| {
+            provider_error(
+                fluxel_rendergraph::RecordingErrorKind::MissingFrameBinding,
+                "unknown compute binding recipe",
+            )
+        })?;
+        if pipeline.device_identity() != self.device {
+            return Err(provider_error(
+                fluxel_rendergraph::RecordingErrorKind::IncompatibleBindingRecipe,
+                "compute binding is foreign to provider device",
+            ));
+        }
+        let bind = |physical: ComputeBindings| {
+            Ok(fluxel_rendergraph::BoundBindings {
+                device: self.device,
+                lease: physical.lease().into(),
+                physical,
+            })
+        };
+        if pipeline.kernel() == ComputeKernel::TextureStoreRgba8 {
+            if !dynamic_offsets.is_empty() || resources.len() != 1 {
+                return Err(provider_error(
+                    fluxel_rendergraph::RecordingErrorKind::IncompatibleBindingRecipe,
+                    "TextureStoreRgba8 requires one whole StorageWrite texture",
+                ));
+            }
+            let fluxel_rendergraph::ResolvedBindingResource::Texture {
+                physical: texture,
+                range: TextureRange::Whole,
+                semantic:
+                    fluxel_rendergraph::BindingResourceSemantic::TextureWrite(
+                        fluxel_rendergraph::TextureWriteUse::Storage,
+                    ),
+            } = &resources[0]
+            else {
+                return Err(provider_error(
+                    fluxel_rendergraph::RecordingErrorKind::DeclaredUseMismatch,
+                    "TextureStoreRgba8 requires TextureWrite(Storage) over Whole",
+                ));
+            };
+            if texture.device_identity() != self.device {
+                return Err(provider_error(
+                    fluxel_rendergraph::RecordingErrorKind::IncompatibleBindingRecipe,
+                    "foreign storage texture",
+                ));
+            }
+            return bind(
+                self.owner
+                    .create_texture_store_bindings(pipeline, texture)
+                    .map_err(|e| provider_error(compute_binding_error_kind(&e), e.to_string()))?,
+            );
+        }
+        if pipeline.kernel() == ComputeKernel::TextureLoadRgba8 {
+            if !dynamic_offsets.is_empty() || resources.len() != 2 {
+                return Err(provider_error(
+                    fluxel_rendergraph::RecordingErrorKind::IncompatibleBindingRecipe,
+                    "TextureLoadRgba8 requires a whole StorageRead texture and RW storage buffer",
+                ));
+            }
+            let (texture, buffer, range) = match (&resources[0], &resources[1]) {
+                (
+                    fluxel_rendergraph::ResolvedBindingResource::Texture {
+                        physical: t,
+                        range: TextureRange::Whole,
+                        semantic:
+                            fluxel_rendergraph::BindingResourceSemantic::TextureRead(
+                                fluxel_rendergraph::TextureReadUse::Storage,
+                            ),
+                    },
+                    fluxel_rendergraph::ResolvedBindingResource::Buffer {
+                        physical: b,
+                        range,
+                        semantic:
+                            fluxel_rendergraph::BindingResourceSemantic::BufferReadWrite(
+                                fluxel_rendergraph::BufferReadWriteUse::Storage,
+                            ),
+                    },
+                ) => (t, b, *range),
+                _ => {
+                    return Err(provider_error(
+                        fluxel_rendergraph::RecordingErrorKind::DeclaredUseMismatch,
+                        "TextureLoadRgba8 requires TextureRead(Storage) then BufferReadWrite(Storage)",
+                    ));
+                }
+            };
+            let (offset, size) = match range {
+                BufferRange::Whole => (0, buffer.descriptor().buffer.size),
+                BufferRange::Bytes { offset, size } => (offset, size),
+            };
+            return bind(
+                self.owner
+                    .create_texture_load_bindings(pipeline, texture, buffer, offset, size)
+                    .map_err(|e| provider_error(compute_binding_error_kind(&e), e.to_string()))?,
+            );
+        }
         if !dynamic_offsets.is_empty() || resources.len() != 1 {
             return Err(provider_error(
                 fluxel_rendergraph::RecordingErrorKind::IncompatibleBindingRecipe,

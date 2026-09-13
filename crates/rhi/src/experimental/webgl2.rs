@@ -7,17 +7,137 @@
 use core::fmt;
 use std::collections::VecDeque;
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use js_sys::{Float32Array, Object, Reflect, Uint32Array};
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{
-    HtmlCanvasElement, WebGl2RenderingContext as Gl, WebGlBuffer, WebGlProgram, WebGlShader,
-    WebGlSync, WebGlUniformLocation, WebGlVertexArrayObject,
+    HtmlCanvasElement, WebGl2RenderingContext as Gl, WebGlBuffer, WebGlFramebuffer, WebGlProgram,
+    WebGlSampler, WebGlShader, WebGlSync, WebGlTexture, WebGlUniformLocation,
+    WebGlVertexArrayObject,
 };
 
 use fluxel_rendergraph::{
-    BufferUsageKind, CompiledGraph, LoadOp, PassKind, ResourceAccessState, ResourceUsageSummary,
-    StoreOp, TextureUsageKind,
+    BufferCapabilities, BufferUsageKind, CompileError, CompileResult, CompiledGraph,
+    DeviceCapabilities, DeviceLimits, LoadOp, PassKind, QueueCapabilities, QueueDescriptor,
+    QueueId, RecordingCapabilities, RecordingModel, RenderGraph, ResourceAccessState,
+    ResourceUsageSummary, StoreOp, SurfaceCapabilities, SynchronizationCapabilities, TextureFormat,
+    TextureFormatCapabilities, TextureUsageKind, TimestampCapabilities,
+    TransientResourceCapabilities, TransitionCapabilities,
 };
+
+mod resource_floor;
+#[cfg(test)]
+mod tests;
+use resource_floor::ResourceFloorObjects;
+pub use resource_floor::WebGl2ResourceFloorEvidence;
+
+/// Compiles a graph for the closed WebGL2 executor before a canvas context or
+/// any browser GPU object is created.
+///
+/// This is deliberately a capability gate, not a lowering path.  The retained
+/// WebGL2 ABI has fixed default-framebuffer raster work only: compute and storage resources are
+/// rejected by RenderGraph with its structured
+/// [`UnsupportedCapability`](fluxel_rendergraph::UnsupportedCapability)
+/// evidence.  Callers must select a raster variant before opening a session;
+/// this function never silently lowers a graph.
+pub fn compile_for_webgl2<F: 'static>(graph: &RenderGraph<F>) -> CompileResult<F> {
+    graph.compile(&webgl2_capabilities())
+}
+
+/// Returns the capability facts of the closed WebGL2 executor.
+///
+/// The facts describe this RHI implementation, rather than an optimistic
+/// projection of WebGL extensions: it has one immediate-context default-framebuffer
+/// raster/present graph queue and no graph lowering for compute, copy, sampling,
+/// storage-buffer, or storage-texture work. [`WebGl2Session::run_resource_floor_fixture`]
+/// is separate, closed browser conformance evidence; it does not make those
+/// operations available to arbitrary RenderGraph workloads.
+pub fn webgl2_capabilities() -> DeviceCapabilities {
+    let rgba8 = TextureFormatCapabilities::builder(TextureFormat::Rgba8Unorm)
+        .sampled(false, false)
+        .storage(false, false)
+        .attachments(true, false, vec![1])
+        .copies(false, false)
+        .build();
+    DeviceCapabilities::builder()
+        .queue(QueueDescriptor::new(
+            QueueId::new(0),
+            QueueCapabilities::new(true, false, false, true),
+        ))
+        .recording(RecordingCapabilities::new(
+            RecordingModel::ImmediateContext,
+            false,
+        ))
+        .transitions(TransitionCapabilities::BackendManaged)
+        .synchronization(SynchronizationCapabilities::SingleQueueOrdering)
+        .timestamps(TimestampCapabilities::Unsupported)
+        .transient_resources(TransientResourceCapabilities::new(false, false, false))
+        .limits(DeviceLimits::new(4, 256))
+        .buffers(BufferCapabilities::new(false, false, false))
+        .texture_format(rgba8)
+        .surface(SurfaceCapabilities::new(
+            vec![TextureFormat::Rgba8Unorm],
+            true,
+            false,
+        ))
+        .build()
+}
+
+/// Test-only observation of browser actions which must remain absent when the
+/// compile-time capability gate rejects a graph.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct BrowserSideEffects {
+    context_creation: u32,
+    resource_creation: u32,
+    recording: u32,
+    submission: u32,
+}
+
+#[cfg(test)]
+thread_local! {
+    static BROWSER_SIDE_EFFECTS: Cell<BrowserSideEffects> = const { Cell::new(BrowserSideEffects {
+        context_creation: 0,
+        resource_creation: 0,
+        recording: 0,
+        submission: 0,
+    }) };
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum BrowserSideEffect {
+    ContextCreation,
+    ResourceCreation,
+    Recording,
+    Submission,
+}
+
+#[cfg(test)]
+fn note_browser_side_effect(effect: BrowserSideEffect) {
+    BROWSER_SIDE_EFFECTS.with(|cell| {
+        let mut observed = cell.get();
+        match effect {
+            BrowserSideEffect::ContextCreation => observed.context_creation += 1,
+            BrowserSideEffect::ResourceCreation => observed.resource_creation += 1,
+            BrowserSideEffect::Recording => observed.recording += 1,
+            BrowserSideEffect::Submission => observed.submission += 1,
+        }
+        cell.set(observed);
+    });
+}
+
+#[cfg(test)]
+fn reset_browser_side_effects() {
+    BROWSER_SIDE_EFFECTS.with(|cell| cell.set(BrowserSideEffects::default()));
+}
+
+#[cfg(test)]
+fn browser_side_effects() -> BrowserSideEffects {
+    BROWSER_SIDE_EFFECTS.with(Cell::get)
+}
 
 /// RHI-owned view of the portable fixed-scene graph contract.
 pub struct FixedUnlitGraph<'a> {
@@ -153,6 +273,37 @@ impl WebGl2SessionError {
     }
 }
 
+/// Failure while opening a WebGL2 session for a specific render graph.
+///
+/// Graph compilation is reported separately so callers can inspect the exact
+/// [`UnsupportedCapability`](fluxel_rendergraph::UnsupportedCapability)
+/// rather than receiving an unstructured browser-open failure.
+#[derive(Clone, Debug)]
+pub enum WebGl2GraphOpenError {
+    /// The graph is outside the closed WebGL2 capability profile.
+    Compile(CompileError),
+    /// The graph was legal, but opening the canvas-bound session failed.
+    Session(WebGl2SessionError),
+}
+
+impl fmt::Display for WebGl2GraphOpenError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Compile(error) => write!(formatter, "{error}"),
+            Self::Session(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for WebGl2GraphOpenError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Compile(error) => Some(error),
+            Self::Session(error) => Some(error),
+        }
+    }
+}
+
 struct Objects {
     program: WebGlProgram,
     position: WebGlBuffer,
@@ -172,6 +323,7 @@ pub struct WebGl2Session {
     canvas: HtmlCanvasElement,
     gl: Gl,
     objects: Option<Objects>,
+    resource_floor: Option<ResourceFloorObjects>,
     fences: VecDeque<PendingFence>,
     state: WebGl2SessionState,
     generation: u64,
@@ -180,11 +332,29 @@ pub struct WebGl2Session {
 }
 
 impl WebGl2Session {
+    /// Compiles `graph` against the closed WebGL2 profile before inspecting
+    /// `canvas` or creating a browser context.
+    ///
+    /// This is the production entry point for graph-backed WebGL2 use.  A
+    /// rejected graph therefore cannot create a context, allocate objects,
+    /// record commands, or submit work. [`Self::new`] remains available for
+    /// the legacy fixed-scene caller that already owns its compatibility
+    /// decision.
+    pub fn new_for_graph<F: 'static>(
+        canvas: JsValue,
+        graph: &RenderGraph<F>,
+    ) -> Result<Self, WebGl2GraphOpenError> {
+        compile_for_webgl2(graph).map_err(WebGl2GraphOpenError::Compile)?;
+        Self::new(canvas).map_err(WebGl2GraphOpenError::Session)
+    }
+
     /// Opens WebGL2 only for the explicitly supplied canvas JS value.
     pub fn new(canvas: JsValue) -> Result<Self, WebGl2SessionError> {
         let canvas = canvas
             .dyn_into::<HtmlCanvasElement>()
             .map_err(|_| WebGl2SessionError::CanvasUnavailable)?;
+        #[cfg(test)]
+        note_browser_side_effect(BrowserSideEffect::ContextCreation);
         let options = Object::new();
         Reflect::set(&options, &"preserveDrawingBuffer".into(), &JsValue::TRUE)
             .map_err(|e| browser("context-options", e))?;
@@ -199,6 +369,7 @@ impl WebGl2Session {
             canvas,
             gl,
             objects: None,
+            resource_floor: None,
             fences: VecDeque::new(),
             state: WebGl2SessionState::Suspended,
             generation: 0,
@@ -268,6 +439,8 @@ impl WebGl2Session {
         self.require_active()?;
         self.validate_graph(graph, draws)?;
         self.validate_draws(draws)?;
+        #[cfg(test)]
+        note_browser_side_effect(BrowserSideEffect::Recording);
         if self.gl.is_context_lost() {
             self.context_lost();
             return Err(WebGl2SessionError::Browser {
@@ -328,6 +501,8 @@ impl WebGl2Session {
             .fence_sync(Gl::SYNC_GPU_COMMANDS_COMPLETE, 0)
             .ok_or_else(|| self.fail("fence", "browser returned no sync object"))?;
         self.gl.flush();
+        #[cfg(test)]
+        note_browser_side_effect(BrowserSideEffect::Submission);
         self.fences.push_back(PendingFence {
             sync: fence,
             generation: self.generation,
@@ -339,11 +514,47 @@ impl WebGl2Session {
         Ok(self.frame_marker)
     }
 
+    /// Executes and retains one fixed WebGL2 common-resource conformance recipe.
+    ///
+    /// The recipe uploads indexed vertex data, an immutable RGBA8 texture, and
+    /// a uniform tint; draws it to an RGBA8 offscreen target with a
+    /// `DEPTH_COMPONENT32F` attachment; copies that color texture; samples it
+    /// in a second pass to the default
+    /// framebuffer, and readbacks deterministic witnesses for the buffer and
+    /// texture copy paths. It intentionally accepts no caller-selected shader,
+    /// format, extent, sampler, or resource handle. The session owns its lease
+    /// until [`Self::dispose`] or [`Self::context_lost`]; after a restored
+    /// context, invoking this method creates a fresh lease rather than reusing
+    /// an invalid browser object.
+    pub fn run_resource_floor_fixture(
+        &mut self,
+    ) -> Result<WebGl2ResourceFloorEvidence, WebGl2SessionError> {
+        self.require_active()?;
+        if let Some(fixture) = &self.resource_floor {
+            return Ok(fixture.evidence);
+        }
+        if self.gl.is_context_lost() {
+            self.context_lost();
+            return Err(self.reject("context-lost", "resource-floor", "WebGL context is lost"));
+        }
+        #[cfg(test)]
+        note_browser_side_effect(BrowserSideEffect::ResourceCreation);
+        let fixture = resource_floor::create(&self.gl)
+            .map_err(|message| self.fail("resource-floor-create", message))?;
+        self.resource_floor = Some(fixture);
+        Ok(self
+            .resource_floor
+            .as_ref()
+            .expect("fixture was just retained")
+            .evidence)
+    }
+
     /// Stops drawing because the adapter observed a context-loss event.
     pub fn context_lost(&mut self) {
         if !matches!(self.state, WebGl2SessionState::Disposed) {
             self.fences.clear();
             self.objects = None;
+            self.resource_floor = None;
             self.state = WebGl2SessionState::Lost;
         }
     }
@@ -380,6 +591,9 @@ impl WebGl2Session {
         if let Some(objects) = self.objects.take() {
             destroy_objects(&self.gl, objects);
         }
+        if let Some(fixture) = self.resource_floor.take() {
+            resource_floor::destroy(&self.gl, fixture);
+        }
         if let Some(error) = finish_error {
             return Err(error);
         }
@@ -404,6 +618,8 @@ impl WebGl2Session {
             self.state = WebGl2SessionState::Lost;
             return Err(self.reject("context-lost", "create-resources", "WebGL context is lost"));
         }
+        #[cfg(test)]
+        note_browser_side_effect(BrowserSideEffect::ResourceCreation);
         let objects = create_objects(&self.gl).map_err(|e| self.fail("create-resources", e))?;
         self.generation = self
             .generation
@@ -601,7 +817,14 @@ fn create_objects(gl: &Gl) -> Result<Objects, String> {
         Gl::FRAGMENT_SHADER,
         "#version 300 es\nprecision mediump float; uniform vec4 u_color; out vec4 out_color; void main(){ out_color=u_color; }",
     )?;
-    let program = gl.create_program().ok_or("createProgram returned null")?;
+    let program = match gl.create_program() {
+        Some(program) => program,
+        None => {
+            gl.delete_shader(Some(&vertex));
+            gl.delete_shader(Some(&fragment));
+            return Err("createProgram returned null".into());
+        }
+    };
     gl.attach_shader(&program, &vertex);
     gl.attach_shader(&program, &fragment);
     gl.link_program(&program);
@@ -693,6 +916,7 @@ fn destroy_objects(gl: &Gl, objects: Objects) {
     gl.delete_buffer(Some(&objects.index));
     gl.delete_program(Some(&objects.program));
 }
+
 fn compile(gl: &Gl, kind: u32, source: &str) -> Result<WebGlShader, String> {
     let shader = gl.create_shader(kind).ok_or("createShader returned null")?;
     gl.shader_source(&shader, source);

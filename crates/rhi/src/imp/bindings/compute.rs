@@ -248,3 +248,190 @@ pub(crate) fn create_texture_pack_bindings(
         _ => Err("texture-pack objects belong to another native backend".into()),
     }
 }
+
+pub(crate) fn create_texture_store_bindings(
+    owner: &Arc<OpenedDevice>,
+    pipeline: &NativeComputePipeline,
+    texture: &OwnedTexture,
+) -> Result<NativeComputeBindings, String> {
+    create_storage_texture_bindings(
+        owner,
+        pipeline,
+        texture,
+        None,
+        0,
+        0,
+        wgt::TextureUses::STORAGE_WRITE_ONLY,
+    )
+}
+
+pub(crate) fn create_texture_load_bindings(
+    owner: &Arc<OpenedDevice>,
+    pipeline: &NativeComputePipeline,
+    texture: &OwnedTexture,
+    buffer: &OwnedBuffer,
+    offset: u64,
+    size: u64,
+) -> Result<NativeComputeBindings, String> {
+    validate_native_compute_binding_range(
+        offset,
+        size,
+        buffer.size,
+        owner.capabilities.min_storage_buffer_offset_alignment,
+        owner.capabilities.max_storage_buffer_binding_size,
+    )?;
+    create_storage_texture_bindings(
+        owner,
+        pipeline,
+        texture,
+        Some(buffer),
+        offset,
+        size,
+        wgt::TextureUses::STORAGE_READ_ONLY,
+    )
+}
+
+fn create_storage_texture_bindings(
+    owner: &Arc<OpenedDevice>,
+    pipeline: &NativeComputePipeline,
+    texture: &OwnedTexture,
+    buffer: Option<&OwnedBuffer>,
+    offset: u64,
+    size: u64,
+    usage: wgt::TextureUses,
+) -> Result<NativeComputeBindings, String> {
+    if !Arc::ptr_eq(owner, &pipeline.0.owner) || !Arc::ptr_eq(owner, &texture.owner) {
+        return Err("storage texture bindings belong to another native device".into());
+    }
+    let desc = wgpu_hal::TextureViewDescriptor {
+        label: Some("fluxel fixed RGBA8 storage view"),
+        format: wgt::TextureFormat::Rgba8Unorm,
+        dimension: wgt::TextureViewDimension::D2,
+        usage,
+        range: wgt::ImageSubresourceRange {
+            aspect: wgt::TextureAspect::All,
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            base_array_layer: 0,
+            array_layer_count: Some(1),
+        },
+    };
+    let entries_one = [wgpu_hal::BindGroupEntry {
+        binding: 0,
+        resource_index: 0,
+        count: 1,
+    }];
+    let entries_two = [
+        entries_one[0].clone(),
+        wgpu_hal::BindGroupEntry {
+            binding: 1,
+            resource_index: 0,
+            count: 1,
+        },
+    ];
+    macro_rules! make {
+        ($device:expr, $pipe:expr, $texture:expr, $buf:expr, $variant:ident) => {{
+            let view = unsafe {
+                // SAFETY: the safe constructor and the ownership check above
+                // prove same-device texture/pipeline ownership; its closed
+                // descriptor is the complete single-sample RGBA8 image and
+                // `usage` is selected only by the fixed read or write recipe.
+                $device.create_texture_view($texture, &desc)
+            }
+            .map_err(|e| format!("storage texture view creation failed: {e}"))?;
+            let group = match $buf {
+                Some(buf) => {
+                    let bindings = [wgpu_hal::BufferBinding::new_unchecked(
+                        buf,
+                        offset,
+                        NonZeroU64::new(size).expect("validated storage range"),
+                    )];
+                    unsafe {
+                        // SAFETY: the closed two-entry descriptor exactly
+                        // matches TextureLoadRgba8's BGL. The buffer range was
+                        // revalidated before this helper; view/pipeline/device
+                        // ownership is retained by the returned binding object.
+                        $device.create_bind_group(&wgpu_hal::BindGroupDescriptor {
+                            label: Some("fluxel fixed RGBA8 storage bindings"),
+                            layout: $pipe,
+                            buffers: &bindings,
+                            samplers: &[],
+                            textures: &[wgpu_hal::TextureBinding { view: &view, usage }],
+                            entries: &entries_two,
+                            acceleration_structures: &[],
+                            external_textures: &[],
+                        })
+                    }
+                }
+                None => unsafe {
+                    // SAFETY: the closed one-entry descriptor exactly matches
+                    // TextureStoreRgba8's BGL, with a same-device live view.
+                    $device.create_bind_group(&wgpu_hal::BindGroupDescriptor {
+                        label: Some("fluxel fixed RGBA8 storage bindings"),
+                        layout: $pipe,
+                        buffers: &[],
+                        samplers: &[],
+                        textures: &[wgpu_hal::TextureBinding { view: &view, usage }],
+                        entries: &entries_one,
+                        acceleration_structures: &[],
+                        external_textures: &[],
+                    })
+                },
+            };
+            match group {
+                Ok(group) => Ok(NativeComputeBindings {
+                    native: Some(NativeComputeBindingsInner::$variant { group, view }),
+                    pipeline: pipeline.clone(),
+                }),
+                Err(e) => {
+                    unsafe {
+                        // SAFETY: bind-group creation failed, so no group can
+                        // reference this uniquely owned same-device view.
+                        $device.destroy_texture_view(view)
+                    };
+                    Err(format!("storage texture bind-group creation failed: {e}"))
+                }
+            }
+        }};
+    }
+    match (
+        &owner.native,
+        pipeline.0.native.as_ref(),
+        texture.native.as_ref(),
+        buffer.and_then(|b| b.native.as_ref()),
+    ) {
+        #[cfg(feature = "dx12")]
+        (
+            NativeDevice::Dx12 { device, .. },
+            Some(NativeComputePipelineInner::Dx12 {
+                bind_group_layout, ..
+            }),
+            Some(NativeTexture::Dx12(texture)),
+            b,
+        ) => {
+            let b = match b {
+                Some(NativeBuffer::Dx12(v)) => Some(v),
+                None => None,
+                _ => return Err("storage buffer backend mismatch".into()),
+            };
+            make!(device, bind_group_layout, texture, b, Dx12Texture)
+        }
+        #[cfg(feature = "vulkan")]
+        (
+            NativeDevice::Vulkan { device, .. },
+            Some(NativeComputePipelineInner::Vulkan {
+                bind_group_layout, ..
+            }),
+            Some(NativeTexture::Vulkan(texture)),
+            b,
+        ) => {
+            let b = match b {
+                Some(NativeBuffer::Vulkan(v)) => Some(v),
+                None => None,
+                _ => return Err("storage buffer backend mismatch".into()),
+            };
+            make!(device, bind_group_layout, texture, b, VulkanTexture)
+        }
+        _ => Err("storage texture bindings belong to another native backend".into()),
+    }
+}
