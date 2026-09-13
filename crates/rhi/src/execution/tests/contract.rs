@@ -81,6 +81,7 @@ fn raster_profile_is_single_queue_raster_compute_copy_rgba8() {
         .find(|facts| facts.format == TextureFormat::Rgba8Unorm)
         .unwrap();
     assert!(rgba8.color_attachment && rgba8.sampled && rgba8.copy_source);
+    assert!(!rgba8.storage_read && !rgba8.storage_write);
     assert_eq!(rgba8.attachment_sample_counts, vec![1]);
     let depth = capabilities
         .texture_formats

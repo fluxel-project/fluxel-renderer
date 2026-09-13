@@ -94,20 +94,11 @@ impl RasterBackend {
 
 fn raster_capabilities(device: &Device) -> DeviceCapabilities {
     let facts = device.capabilities();
-    let mut capabilities = raster_capabilities_from_limit_and_filterability(
+    raster_capabilities_from_limit_and_filterability(
         facts.max_compute_workgroups_per_dimension,
         facts.rgba8_unorm_filterable,
         facts.rgba8_unorm_srgb_filterable,
-    );
-    if let Some(format) = capabilities
-        .texture_formats
-        .iter_mut()
-        .find(|format| format.format == TextureFormat::Rgba8Unorm)
-    {
-        format.storage_read = facts.rgba8_unorm_storage_read_enabled;
-        format.storage_write = facts.rgba8_unorm_storage_write;
-    }
-    capabilities
+    )
 }
 
 #[cfg(all(windows, any(feature = "dx12", feature = "vulkan")))]
