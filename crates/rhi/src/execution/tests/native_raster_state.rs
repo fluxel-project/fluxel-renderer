@@ -749,7 +749,8 @@ pub(super) fn run_raster_negative_paths(backend_kind: crate::Backend) {
         backend.completion_status(&completion),
         CompletionStatus::Complete
     );
-    assert!(crate::imp::validation_diagnostics(&device.inner).is_empty());
+    let diagnostics = crate::imp::validation_diagnostics(&device.inner);
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
 
     // A separate two-submission witness proves Load selects the read/write
     // depth state rather than treating it like a clear. The first submission
@@ -874,7 +875,8 @@ pub(super) fn run_raster_negative_paths(backend_kind: crate::Backend) {
         backend.completion_status(&completion),
         CompletionStatus::Complete
     );
-    assert!(crate::imp::validation_diagnostics(&device.inner).is_empty());
+    let diagnostics = crate::imp::validation_diagnostics(&device.inner);
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
 
     let no_attachment_usage = device
         .create_texture(TextureDescriptor {

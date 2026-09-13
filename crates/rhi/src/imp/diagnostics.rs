@@ -66,7 +66,8 @@ pub(crate) fn validation_diagnostics(owner: &Arc<OpenedDevice>) -> Vec<String> {
     if let NativeDevice::Dx12 { device, .. } = &owner.native {
         use windows::{
             Win32::Graphics::Direct3D12::{
-                D3D12_MESSAGE, D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE,
+                D3D12_MESSAGE, D3D12_MESSAGE_ID_CLEARDEPTHSTENCILVIEW_MISMATCHINGCLEARVALUE,
+                D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE,
                 D3D12_MESSAGE_SEVERITY_CORRUPTION, D3D12_MESSAGE_SEVERITY_ERROR,
                 D3D12_MESSAGE_SEVERITY_WARNING, ID3D12InfoQueue,
             },
@@ -115,11 +116,14 @@ pub(crate) fn validation_diagnostics(owner: &Arc<OpenedDevice>) -> Vec<String> {
                     "DX12 InfoQueue severity={:?} category={:?} id={:?}: {description}",
                     message.Severity, message.Category, message.ID,
                 );
-                if message.ID == D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE {
+                if message.ID == D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE
+                    || message.ID == D3D12_MESSAGE_ID_CLEARDEPTHSTENCILVIEW_MISMATCHINGCLEARVALUE
+                {
                     // wgpu-hal's portable TextureDescriptor exposes no D3D12
                     // optimized-clear value, and upstream wgpu-hal 30 filters
-                    // #820 as non-actionable performance spam. The clear is
-                    // still semantically correct, so keep it observable without
+                    // color/depth clear-value mismatch messages (#820/#821) as
+                    // non-actionable performance spam. The clear is still
+                    // semantically correct, so keep it observable without
                     // classifying it as a correctness diagnostic.
                     eprintln!("ignored {rendered}");
                     continue;

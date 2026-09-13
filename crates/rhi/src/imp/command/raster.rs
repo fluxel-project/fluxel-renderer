@@ -204,7 +204,11 @@ pub(crate) fn begin_raster(
                                 usage: wgt::TextureUses::DEPTH_STENCIL_WRITE,
                             },
                             depth_ops: *ops,
-                            stencil_ops: wgpu_hal::AttachmentOps::empty(),
+                            // Vulkan's HAL render-pass lowering requires a
+                            // complete load/store pair even when the selected
+                            // view has no stencil aspect.
+                            stencil_ops: wgpu_hal::AttachmentOps::LOAD_DONT_CARE
+                                | wgpu_hal::AttachmentOps::STORE_DISCARD,
                             clear_value: (*clear, 0),
                         }
                     }),
@@ -299,7 +303,8 @@ pub(crate) fn begin_raster(
                                 usage: wgt::TextureUses::DEPTH_STENCIL_WRITE,
                             },
                             depth_ops: *ops,
-                            stencil_ops: wgpu_hal::AttachmentOps::empty(),
+                            stencil_ops: wgpu_hal::AttachmentOps::LOAD_DONT_CARE
+                                | wgpu_hal::AttachmentOps::STORE_DISCARD,
                             clear_value: (*clear, 0),
                         }
                     }),
