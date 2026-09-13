@@ -490,7 +490,7 @@ pub(in crate::execution) fn valid_compute_dispatch(groups: [u32; 3], maximum: [u
 }
 
 impl ComputeBackend {
-    #[cfg(test)]
+    #[cfg(all(test, windows))]
     pub(in crate::execution) fn test_transient_observations(&self) -> TestTransientObservations {
         self.transient_observations.clone()
     }
