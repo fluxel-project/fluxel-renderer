@@ -314,6 +314,10 @@ pub(crate) fn transition_buffer(
 pub(crate) fn begin_compute(_: &mut CopyEncoder, _: &str) -> Result<(), String> {
     Err("native compute is only supported on Windows".into())
 }
+#[allow(
+    clippy::too_many_arguments,
+    reason = "fail-closed stub mirrors the native raster boundary exactly"
+)]
 pub(crate) fn begin_raster(
     _: &mut CopyEncoder,
     _: &OwnedTexture,
